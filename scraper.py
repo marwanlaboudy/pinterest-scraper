@@ -13,9 +13,7 @@ def human_type(page, text):
         page.keyboard.type(char, delay=random.randint(50, 120))
 
 def dismiss_modal(page):
-    """Close Pinterest signup modal if it appears"""
     try:
-        # try clicking the X close button
         close = page.locator("[data-test-id='fullPageSignupModal'] [aria-label='Close']")
         if close.is_visible(timeout=3000):
             close.click()
@@ -26,7 +24,6 @@ def dismiss_modal(page):
         pass
 
     try:
-        # try pressing Escape
         page.keyboard.press("Escape")
         print("Closed modal via Escape")
         page.wait_for_timeout(1000)
@@ -34,7 +31,6 @@ def dismiss_modal(page):
         pass
 
     try:
-        # click outside the modal (top left corner)
         page.mouse.click(10, 10)
         print("Closed modal by clicking outside")
         page.wait_for_timeout(1000)
@@ -54,20 +50,31 @@ def run():
             ]
         )
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800},
-            # pretend to have been here before — reduces modal aggression
-            locale="en-US",
-            timezone_id="America/New_York",
-        )
-
-        context.add_cookies([{
-            "name": "cpb",
-            "value": "1",
-            "domain": ".pinterest.com",
-            "path": "/",
-        }])
+        # ✅ load saved session if it exists
+        session_file = "pinterest_session.json"
+        if os.path.exists(session_file):
+            print("Loading saved Pinterest session...")
+            context = browser.new_context(
+                storage_state=session_file,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+        else:
+            print("No session found, starting fresh...")
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+            context.add_cookies([{
+                "name": "cpb",
+                "value": "1",
+                "domain": ".pinterest.com",
+                "path": "/",
+            }])
 
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -76,15 +83,12 @@ def run():
         page.goto("https://www.pinterest.com/ideas/", wait_until="domcontentloaded")
         page.wait_for_timeout(WAIT)
 
-        # dismiss modal before doing anything
         dismiss_modal(page)
 
-        # SEARCH
         print("Searching:", query)
         search_box = page.locator("#search-input")
         search_box.wait_for(timeout=20000)
 
-        # wait for modal to be fully gone before clicking
         try:
             page.locator("[data-test-id='fullPageSignupModal']").wait_for(state="hidden", timeout=5000)
         except Exception:
@@ -95,18 +99,14 @@ def run():
         page.keyboard.press("Enter")
         page.wait_for_timeout(WAIT)
 
-        # save search URL
         search_url = page.url
         print("Search URL:", search_url)
 
-        # scroll to top
         page.mouse.wheel(0, -10000)
         page.wait_for_timeout(2000)
 
-        # dismiss modal again in case it reappeared
         dismiss_modal(page)
 
-        # capture video stream
         stream = {"url": None}
 
         def handle_response(resp):
@@ -117,13 +117,11 @@ def run():
 
         page.on("response", handle_response)
 
-        # get pin links
         pins = page.locator("div[data-test-id='pin']:visible a")
         pins.first.wait_for(timeout=20000)
         count = pins.count()
         print(f"Found {count} pins")
 
-        # collect all pin URLs upfront
         pin_urls = []
         for i in range(min(count, 10)):
             try:
