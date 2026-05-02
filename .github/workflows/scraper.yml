@@ -13,6 +13,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Load Pinterest session
+        run: |
+          echo "${{ secrets.PINTEREST_SESSION }}" | base64 -d > pinterest_session.json
+
       - name: Set git remote with token
         run: |
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
