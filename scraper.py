@@ -1,6 +1,7 @@
 import sys
 import random
 import os
+import re
 from playwright.sync_api import sync_playwright
 
 query = sys.argv[1]
@@ -16,21 +17,21 @@ def dismiss_modal(page):
             print("Closed modal via X button")
             page.wait_for_timeout(1000)
             return
-    except:
+    except Exception:
         pass
 
     try:
         page.keyboard.press("Escape")
         print("Closed modal via Escape")
         page.wait_for_timeout(1000)
-    except:
+    except Exception:
         pass
 
     try:
         page.mouse.click(10, 10)
         print("Closed modal by clicking outside")
         page.wait_for_timeout(1000)
-    except:
+    except Exception:
         pass
 
 def goto_with_retry(page, url, retries=3, timeout=60000):
@@ -43,22 +44,27 @@ def goto_with_retry(page, url, retries=3, timeout=60000):
             page.wait_for_timeout(3000)
     return False
 
-def build_video_url(query):
-    return f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
-
 def pick_best_m3u8(urls):
-    # prefer 720w, else highest width found
     if not urls:
         return None
     for u in urls:
         if "_720w" in u:
             return u
-    # fallback: sort by width suffix if present
     def score(u):
-        import re
         m = re.search(r"_(\d+)w\.m3u8", u)
         return int(m.group(1)) if m else 0
     return sorted(urls, key=score, reverse=True)[0]
+
+def extract_from_page_source(page):
+    try:
+        content = page.content()
+        matches = re.findall(r'https://v1\.pinimg\.com/videos/[^"\']+\.m3u8', content)
+        if matches:
+            print(f"Found m3u8 in page source: {matches[0]}")
+            return matches[0]
+    except Exception as e:
+        print(f"Page source extraction failed: {e}")
+    return None
 
 def run():
     with sync_playwright() as p:
@@ -73,30 +79,47 @@ def run():
             ]
         )
 
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="America/New_York",
-        )
+        # load saved session if it exists
+        session_file = "pinterest_session.json"
+        if os.path.exists(session_file):
+            print("Loading saved Pinterest session...")
+            context = browser.new_context(
+                storage_state=session_file,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+        else:
+            print("No session found, starting fresh...")
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+            context.add_cookies([{
+                "name": "cpb",
+                "value": "1",
+                "domain": ".pinterest.com",
+                "path": "/",
+            }])
 
         page = context.new_page()
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        # 🔥 Open video search page directly
-        video_url = build_video_url(query)
-        print("Opening video search:", video_url)
-        goto_with_retry(page, video_url)
+        # open video search directly
+        video_search_url = f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
+        print("Opening video search:", video_search_url)
+        goto_with_retry(page, video_search_url)
         page.wait_for_timeout(WAIT)
 
         dismiss_modal(page)
 
-        # load a bit more
         page.mouse.wheel(0, 2000)
         page.wait_for_timeout(3000)
 
-        # 🧠 collect first 20 pins (deduped)
+        # collect pin URLs
         pins = page.locator("div[data-test-id='pin']:visible a")
         pins.first.wait_for(timeout=20000)
 
@@ -104,7 +127,7 @@ def run():
         print(f"Found {count} video pins")
 
         seen = set()
-        video_urls = []
+        pin_urls = []
         for i in range(count):
             try:
                 href = pins.nth(i).get_attribute("href")
@@ -112,19 +135,18 @@ def run():
                     full = f"https://www.pinterest.com{href}" if href.startswith("/") else href
                     if full not in seen:
                         seen.add(full)
-                        video_urls.append(full)
-            except:
+                        pin_urls.append(full)
+            except Exception:
                 continue
 
-        if not video_urls:
-            print("No videos found")
+        if not pin_urls:
+            print("No pins found")
             browser.close()
             sys.exit(1)
 
-        # 🔁 randomize order
-        random.shuffle(video_urls)
+        print(f"Collected {len(pin_urls)} pin URLs")
 
-        # 🎯 network capture (collect ALL m3u8 for a page)
+        # capture m3u8 from network
         collected_m3u8 = []
 
         def handle_response(resp):
@@ -137,19 +159,19 @@ def run():
 
         found_url = None
 
-        # 🔁 try each candidate until we get a usable stream
-        for i, chosen_url in enumerate(video_urls):
-            print(f"Trying video {i+1}: {chosen_url}")
+        for i, pin_url in enumerate(pin_urls):
+            print(f"Trying pin {i+1}: {pin_url}")
 
             collected_m3u8.clear()
 
-            ok = goto_with_retry(page, chosen_url)
+            ok = goto_with_retry(page, pin_url)
             if not ok:
+                print(f"Could not open pin {i+1}, skipping...")
                 continue
 
             page.wait_for_timeout(6000)
 
-            # 1) pick from network if any
+            # try network first
             if collected_m3u8:
                 best = pick_best_m3u8(collected_m3u8)
                 if best:
@@ -157,30 +179,34 @@ def run():
                     found_url = best
                     break
 
-            # 2) fallback: DOM video src
-            video_src = page.evaluate("""
-            () => {
-                const v = document.querySelector("video");
-                return v ? (v.currentSrc || v.src) : null;
-            }
-            """)
-            if video_src:
-                print("Found video element:", video_src)
-                if not video_src.startswith("blob"):
+            # try page source
+            src = extract_from_page_source(page)
+            if src:
+                found_url = src
+                break
+
+            # try DOM video element
+            try:
+                video_src = page.evaluate("""() => {
+                    const v = document.querySelector('video');
+                    return v ? (v.currentSrc || v.src) : null;
+                }""")
+                if video_src and not video_src.startswith("blob"):
+                    print("Picked stream (DOM):", video_src)
                     found_url = video_src
-                    print("Picked stream (DOM):", found_url)
                     break
                 else:
-                    print("Blob video detected, skipping...")
+                    print("No usable stream found, trying next pin...")
+            except Exception:
+                pass
 
         browser.close()
 
         if not found_url:
-            print("No working video found after trying all")
+            print("No video found after trying all pins")
             sys.exit(1)
 
-        # 🎬 DOWNLOAD (your original style)
-        print("Downloading video...")
+        print("Downloading and compressing video...")
         os.system(
             f'ffmpeg -y '
             f'-i "{found_url}" '
@@ -203,6 +229,8 @@ def run():
         )
 
         if os.path.exists("output.mp4"):
+            size_mb = os.path.getsize("output.mp4") / (1024 * 1024)
+            print(f"Video size: {size_mb:.1f} MB")
             print("Saved as output.mp4")
         else:
             print("Download failed")
