@@ -1,37 +1,15 @@
-name: Pinterest Scraper
+- name: Save video
+  run: |
+    if [ -f output.mp4 ]; then
+      mkdir -p videos
+      cp output.mp4 videos/output.mp4
 
-on:
-  repository_dispatch:
-    types: [run-scraper]
+      git config user.name "github-actions"
+      git config user.email "actions@github.com"
 
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg python3 python3-pip
-
-          pip install playwright
-          playwright install --with-deps
-
-      - name: Run scraper
-        run: |
-          python scraper.py "${{ github.event.client_payload.query }}"
-
-      - name: Save video
-        run: |
-          mkdir -p videos
-          cp output.mp4 videos/output.mp4
-
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-
-          git add videos/output.mp4
-          git commit -m "Add video"
-          git push
+      git add videos/output.mp4
+      git commit -m "Add video"
+      git push
+    else
+      echo "No video found, skipping save"
+    fi
