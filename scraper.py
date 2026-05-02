@@ -12,6 +12,35 @@ def human_type(page, text):
     for char in text:
         page.keyboard.type(char, delay=random.randint(50, 120))
 
+def dismiss_modal(page):
+    """Close Pinterest signup modal if it appears"""
+    try:
+        # try clicking the X close button
+        close = page.locator("[data-test-id='fullPageSignupModal'] [aria-label='Close']")
+        if close.is_visible(timeout=3000):
+            close.click()
+            print("Closed modal via X button")
+            page.wait_for_timeout(1000)
+            return
+    except Exception:
+        pass
+
+    try:
+        # try pressing Escape
+        page.keyboard.press("Escape")
+        print("Closed modal via Escape")
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
+    try:
+        # click outside the modal (top left corner)
+        page.mouse.click(10, 10)
+        print("Closed modal by clicking outside")
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
 def run():
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -25,33 +54,57 @@ def run():
             ]
         )
 
-        page = browser.new_page(
+        context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 1280, "height": 800},
+            # pretend to have been here before — reduces modal aggression
+            locale="en-US",
+            timezone_id="America/New_York",
         )
 
+        context.add_cookies([{
+            "name": "cpb",
+            "value": "1",
+            "domain": ".pinterest.com",
+            "path": "/",
+        }])
+
+        page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         print("Opening Pinterest...")
         page.goto("https://www.pinterest.com/ideas/", wait_until="domcontentloaded")
         page.wait_for_timeout(WAIT)
 
+        # dismiss modal before doing anything
+        dismiss_modal(page)
+
         # SEARCH
         print("Searching:", query)
         search_box = page.locator("#search-input")
         search_box.wait_for(timeout=20000)
+
+        # wait for modal to be fully gone before clicking
+        try:
+            page.locator("[data-test-id='fullPageSignupModal']").wait_for(state="hidden", timeout=5000)
+        except Exception:
+            pass
+
         search_box.click()
         human_type(page, query)
         page.keyboard.press("Enter")
         page.wait_for_timeout(WAIT)
 
-        # save search URL after search completes
+        # save search URL
         search_url = page.url
         print("Search URL:", search_url)
 
         # scroll to top
         page.mouse.wheel(0, -10000)
         page.wait_for_timeout(2000)
+
+        # dismiss modal again in case it reappeared
+        dismiss_modal(page)
 
         # capture video stream
         stream = {"url": None}
@@ -64,13 +117,13 @@ def run():
 
         page.on("response", handle_response)
 
-        # get pin hrefs first — collect all links before clicking anything
+        # get pin links
         pins = page.locator("div[data-test-id='pin']:visible a")
         pins.first.wait_for(timeout=20000)
         count = pins.count()
         print(f"Found {count} pins")
 
-        # collect all pin URLs upfront so we never deal with stale locators
+        # collect all pin URLs upfront
         pin_urls = []
         for i in range(min(count, 10)):
             try:
@@ -87,12 +140,11 @@ def run():
             print(f"Trying pin {i+1}: {pin_url}")
 
             try:
-                # navigate directly to pin instead of clicking
                 page.goto(pin_url, wait_until="domcontentloaded")
                 page.wait_for_timeout(6000)
             except Exception as e:
                 print(f"Could not open pin {i+1}: {e}")
-            
+
             for _ in range(8):
                 if stream["url"]:
                     break
@@ -102,10 +154,10 @@ def run():
                 print("Video found!")
                 break
 
-            # go back to search results by navigating directly to saved URL
             print("No stream, going back to search...")
             page.goto(search_url, wait_until="domcontentloaded")
             page.wait_for_timeout(WAIT)
+            dismiss_modal(page)
 
         browser.close()
 
