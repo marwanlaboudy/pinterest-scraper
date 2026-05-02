@@ -165,6 +165,7 @@ def run():
         print("Downloading and compressing video...")
         os.system(
             f'ffmpeg -y -i "{stream["url"]}" '
+            f'-t 15 '
             f'-vf "scale=720:1280" '
             f'-r 25 '
             f'-pix_fmt yuv420p '
