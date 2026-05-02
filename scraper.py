@@ -2,6 +2,7 @@ import sys
 import random
 import os
 import re
+from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
 
 query = sys.argv[1]
@@ -65,6 +66,45 @@ def extract_from_page_source(page):
     except Exception as e:
         print(f"Page source extraction failed: {e}")
     return None
+
+def create_button_png(path="shop_now_btn.png", width=340, height=90, radius=45):
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # White pill background
+    draw.rounded_rectangle([0, 0, width - 1, height - 1], radius=radius, fill=(255, 255, 255, 255))
+    # Dark border
+    draw.rounded_rectangle([0, 0, width - 1, height - 1], radius=radius, outline=(30, 30, 30, 255), width=3)
+
+    # CI-safe font loading with multiple fallbacks
+    font = None
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",         # Ubuntu / GitHub Actions
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", # fallback
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",          # fallback
+    ]
+    for fp in font_paths:
+        if os.path.exists(fp):
+            try:
+                font = ImageFont.truetype(fp, 36)
+                print(f"Loaded font: {fp}")
+                break
+            except Exception:
+                continue
+    if font is None:
+        print("No system font found, using default")
+        font = ImageFont.load_default()
+
+    text = "SHOP NOW"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    x = (width - text_w) // 2
+    y = (height - text_h) // 2 - bbox[1]
+    draw.text((x, y), text, fill=(30, 30, 30, 255), font=font)
+
+    img.save(path)
+    print(f"Button PNG saved: {path}")
 
 def run():
     with sync_playwright() as p:
@@ -174,18 +214,19 @@ def run():
             print("No video found")
             sys.exit(1)
 
-        print("Downloading + adding CTA...")
+        print("Generating SHOP NOW button...")
+        create_button_png()
 
+        print("Downloading + adding CTA...")
         os.system(
             f'ffmpeg -y '
             f'-i "{found_url}" '
+            f'-i "shop_now_btn.png" '
             f'-f lavfi -i anullsrc=r=44100:cl=stereo '
             f'-t 15 '
-            f'-vf "scale=720:1280,'
-            f'drawtext=text=\'SHOP NOW\':'
-            f'fontcolor=white:fontsize=60:'
-            f'x=(w-text_w)/2:y=h-250:'
-            f'box=1:boxcolor=0x000000AA:boxborderw=20" '
+            f'-filter_complex '
+            f'"[0:v]scale=720:1280[bg];'
+            f'[bg][1:v]overlay=(W-w)/2:H-220" '
             f'-r 25 '
             f'-pix_fmt yuv420p '
             f'-c:v libx264 '
