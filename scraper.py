@@ -165,16 +165,21 @@ def run():
 
         print("Downloading and compressing video...")
         os.system(
-            f'ffmpeg -y -i "{stream["url"]}" '
-            f'-vf "scale=720:-2" '
-            f'-c:v libx264 '
-            f'-crf 28 '
-            f'-preset fast '
-            f'-c:a aac '
-            f'-b:a 128k '
-            f'-movflags +faststart '
-            f'output.mp4'
-        )
+    f'ffmpeg -y -i "{stream["url"]}" '
+    f'-vf "scale=720:1280" '    # exact same scale as working workflow
+    f'-r 25 '                    # exact same framerate
+    f'-pix_fmt yuv420p '         # exact same pixel format
+    f'-c:v libx264 '
+    f'-profile:v baseline '
+    f'-level 3.0 '
+    f'-crf 28 '
+    f'-preset fast '
+    f'-c:a aac '
+    f'-ar 44100 '
+    f'-b:a 128k '
+    f'-movflags +faststart '
+    f'output.mp4'
+)
 
         if os.path.exists("output.mp4"):
             size_mb = os.path.getsize("output.mp4") / (1024 * 1024)
