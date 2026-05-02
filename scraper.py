@@ -46,6 +46,20 @@ def goto_with_retry(page, url, retries=3, timeout=60000):
 def build_video_url(query):
     return f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
 
+def pick_best_m3u8(urls):
+    # prefer 720w, else highest width found
+    if not urls:
+        return None
+    for u in urls:
+        if "_720w" in u:
+            return u
+    # fallback: sort by width suffix if present
+    def score(u):
+        import re
+        m = re.search(r"_(\d+)w\.m3u8", u)
+        return int(m.group(1)) if m else 0
+    return sorted(urls, key=score, reverse=True)[0]
+
 def run():
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -66,47 +80,39 @@ def run():
         )
 
         page = context.new_page()
-        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
 
-        # 🔥 OPEN VIDEO SEARCH PAGE
+        # 🔥 Open video search page directly
         video_url = build_video_url(query)
         print("Opening video search:", video_url)
-
         goto_with_retry(page, video_url)
         page.wait_for_timeout(WAIT)
 
         dismiss_modal(page)
 
-        # scroll to load more
+        # load a bit more
         page.mouse.wheel(0, 2000)
         page.wait_for_timeout(3000)
 
-        # 🎯 STREAM CAPTURE
-        stream = {"url": None}
-
-        def handle_response(resp):
-            url = resp.url
-            if ".m3u8" in url and "pinimg" in url:
-                print("Found stream:", url)
-                stream["url"] = url
-
-        page.on("response", handle_response)
-
-        # 🧠 GET FIRST 20 VIDEOS
+        # 🧠 collect first 20 pins (deduped)
         pins = page.locator("div[data-test-id='pin']:visible a")
         pins.first.wait_for(timeout=20000)
 
         count = min(pins.count(), 20)
         print(f"Found {count} video pins")
 
+        seen = set()
         video_urls = []
-
         for i in range(count):
             try:
                 href = pins.nth(i).get_attribute("href")
                 if href:
-                    full_url = f"https://www.pinterest.com{href}" if href.startswith("/") else href
-                    video_urls.append(full_url)
+                    full = f"https://www.pinterest.com{href}" if href.startswith("/") else href
+                    if full not in seen:
+                        seen.add(full)
+                        video_urls.append(full)
             except:
                 continue
 
@@ -115,44 +121,69 @@ def run():
             browser.close()
             sys.exit(1)
 
-        # 🔥 RANDOM + RETRY
+        # 🔁 randomize order
         random.shuffle(video_urls)
 
-        found = False
+        # 🎯 network capture (collect ALL m3u8 for a page)
+        collected_m3u8 = []
 
+        def handle_response(resp):
+            url = resp.url
+            if ".m3u8" in url:
+                collected_m3u8.append(url)
+                print("Seen m3u8:", url)
+
+        page.on("response", handle_response)
+
+        found_url = None
+
+        # 🔁 try each candidate until we get a usable stream
         for i, chosen_url in enumerate(video_urls):
             print(f"Trying video {i+1}: {chosen_url}")
 
-            stream["url"] = None
+            collected_m3u8.clear()
 
-            success = goto_with_retry(page, chosen_url)
-            if not success:
+            ok = goto_with_retry(page, chosen_url)
+            if not ok:
                 continue
 
             page.wait_for_timeout(6000)
 
-            for _ in range(10):
-                if stream["url"]:
-                    found = True
+            # 1) pick from network if any
+            if collected_m3u8:
+                best = pick_best_m3u8(collected_m3u8)
+                if best:
+                    print("Picked stream (network):", best)
+                    found_url = best
                     break
-                page.wait_for_timeout(1000)
 
-            if found:
-                print("Video stream found!")
-                break
+            # 2) fallback: DOM video src
+            video_src = page.evaluate("""
+            () => {
+                const v = document.querySelector("video");
+                return v ? (v.currentSrc || v.src) : null;
+            }
+            """)
+            if video_src:
+                print("Found video element:", video_src)
+                if not video_src.startswith("blob"):
+                    found_url = video_src
+                    print("Picked stream (DOM):", found_url)
+                    break
+                else:
+                    print("Blob video detected, skipping...")
 
         browser.close()
 
-        if not found:
+        if not found_url:
             print("No working video found after trying all")
             sys.exit(1)
 
-        # 🎬 DOWNLOAD (UNCHANGED)
+        # 🎬 DOWNLOAD (your original style)
         print("Downloading video...")
-
         os.system(
             f'ffmpeg -y '
-            f'-i "{stream["url"]}" '
+            f'-i "{found_url}" '
             f'-f lavfi -i anullsrc=r=44100:cl=stereo '
             f'-t 15 '
             f'-vf "scale=720:1280" '
