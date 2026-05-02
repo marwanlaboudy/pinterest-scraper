@@ -50,7 +50,7 @@ def run():
             ]
         )
 
-        # ✅ load saved session if it exists
+        # load saved session if it exists
         session_file = "pinterest_session.json"
         if os.path.exists(session_file):
             print("Loading saved Pinterest session...")
@@ -163,10 +163,38 @@ def run():
             print("No video found after trying multiple pins")
             sys.exit(1)
 
-        print("Downloading video...")
-        os.system(f'ffmpeg -y -i "{stream["url"]}" -c copy output.mp4')
+        print("Downloading and compressing video...")
+        os.system(
+            f'ffmpeg -y -i "{stream["url"]}" '
+            f'-vf "scale=720:-2" '
+            f'-c:v libx264 '
+            f'-crf 28 '
+            f'-preset fast '
+            f'-c:a aac '
+            f'-b:a 128k '
+            f'-movflags +faststart '
+            f'output.mp4'
+        )
 
         if os.path.exists("output.mp4"):
+            size_mb = os.path.getsize("output.mp4") / (1024 * 1024)
+            print(f"Video size: {size_mb:.1f} MB")
+
+            if size_mb > 100:
+                print("Video still too large, compressing more...")
+                os.system(
+                    f'ffmpeg -y -i output.mp4 '
+                    f'-vf "scale=480:-2" '
+                    f'-c:v libx264 '
+                    f'-crf 32 '
+                    f'-preset fast '
+                    f'-c:a aac '
+                    f'-b:a 96k '
+                    f'output_small.mp4 && mv output_small.mp4 output.mp4'
+                )
+                size_mb = os.path.getsize("output.mp4") / (1024 * 1024)
+                print(f"Compressed video size: {size_mb:.1f} MB")
+
             print("Saved as output.mp4")
         else:
             print("Download failed")
