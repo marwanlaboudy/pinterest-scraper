@@ -37,6 +37,16 @@ def dismiss_modal(page):
     except Exception:
         pass
 
+def goto_with_retry(page, url, retries=3, timeout=60000):
+    for attempt in range(retries):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            return True
+        except Exception as e:
+            print(f"Goto attempt {attempt+1} failed: {e}")
+            page.wait_for_timeout(3000)
+    return False
+
 def run():
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -79,7 +89,7 @@ def run():
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         print("Opening Pinterest...")
-        page.goto("https://www.pinterest.com/ideas/", wait_until="domcontentloaded")
+        goto_with_retry(page, "https://www.pinterest.com/ideas/")
         page.wait_for_timeout(WAIT)
 
         dismiss_modal(page)
@@ -136,11 +146,12 @@ def run():
         for i, pin_url in enumerate(pin_urls):
             print(f"Trying pin {i+1}: {pin_url}")
 
-            try:
-                page.goto(pin_url, wait_until="domcontentloaded")
-                page.wait_for_timeout(6000)
-            except Exception as e:
-                print(f"Could not open pin {i+1}: {e}")
+            success = goto_with_retry(page, pin_url)
+            if not success:
+                print(f"Could not open pin {i+1}, skipping...")
+                continue
+
+            page.wait_for_timeout(6000)
 
             for _ in range(8):
                 if stream["url"]:
@@ -152,7 +163,7 @@ def run():
                 break
 
             print("No stream, going back to search...")
-            page.goto(search_url, wait_until="domcontentloaded")
+            goto_with_retry(page, search_url)
             page.wait_for_timeout(WAIT)
             dismiss_modal(page)
 
