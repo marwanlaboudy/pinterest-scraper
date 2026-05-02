@@ -32,12 +32,12 @@ jobs:
         run: |
           xvfb-run python scraper.py "${{ github.event.client_payload.query }}"
 
-      - name: Save video
+      - name: Save video as GitHub Release
         run: |
-          mkdir -p videos
-          cp output.mp4 videos/output.mp4
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add videos/output.mp4
-          git commit -m "Add video"
-          git push
+          gh release delete latest-video --yes 2>/dev/null || true
+          gh release create latest-video output.mp4 \
+            --title "Latest Video" \
+            --notes "Auto-generated" \
+            --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
