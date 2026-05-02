@@ -47,6 +47,9 @@ def goto_with_retry(page, url, retries=3, timeout=60000):
             page.wait_for_timeout(3000)
     return False
 
+def build_video_url(query):
+    return f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
+
 def run():
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -60,62 +63,29 @@ def run():
             ]
         )
 
-        session_file = "pinterest_session.json"
-        if os.path.exists(session_file):
-            print("Loading saved Pinterest session...")
-            context = browser.new_context(
-                storage_state=session_file,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-        else:
-            print("No session found, starting fresh...")
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-            context.add_cookies([{
-                "name": "cpb",
-                "value": "1",
-                "domain": ".pinterest.com",
-                "path": "/",
-            }])
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
 
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        print("Opening Pinterest...")
-        goto_with_retry(page, "https://www.pinterest.com/ideas/")
+        # 🔥 DIRECT VIDEO SEARCH (NEW LOGIC)
+        video_url = build_video_url(query)
+        print("Opening video search:", video_url)
+
+        goto_with_retry(page, video_url)
         page.wait_for_timeout(WAIT)
 
         dismiss_modal(page)
 
-        print("Searching:", query)
-        search_box = page.locator("#search-input")
-        search_box.wait_for(timeout=20000)
+        # scroll to load videos
+        page.mouse.wheel(0, 2000)
+        page.wait_for_timeout(3000)
 
-        try:
-            page.locator("[data-test-id='fullPageSignupModal']").wait_for(state="hidden", timeout=5000)
-        except Exception:
-            pass
-
-        search_box.click()
-        human_type(page, query)
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(WAIT)
-
-        search_url = page.url
-        print("Search URL:", search_url)
-
-        page.mouse.wheel(0, -10000)
-        page.wait_for_timeout(2000)
-
-        dismiss_modal(page)
-
+        # 🎯 CAPTURE STREAM
         stream = {"url": None}
 
         def handle_response(resp):
@@ -126,54 +96,50 @@ def run():
 
         page.on("response", handle_response)
 
+        # 🧠 GET FIRST 20 VIDEOS
         pins = page.locator("div[data-test-id='pin']:visible a")
         pins.first.wait_for(timeout=20000)
-        count = pins.count()
-        print(f"Found {count} pins")
 
-        pin_urls = []
-        for i in range(min(count, 15)):
+        count = min(pins.count(), 20)
+        print(f"Found {count} video pins")
+
+        video_urls = []
+
+        for i in range(count):
             try:
                 href = pins.nth(i).get_attribute("href")
                 if href:
                     full_url = f"https://www.pinterest.com{href}" if href.startswith("/") else href
-                    pin_urls.append(full_url)
-            except Exception:
+                    video_urls.append(full_url)
+            except:
                 continue
 
-        print(f"Collected {len(pin_urls)} pin URLs")
+        if not video_urls:
+            print("No videos found")
+            browser.close()
+            sys.exit(1)
 
-        for i, pin_url in enumerate(pin_urls):
-            print(f"Trying pin {i+1}: {pin_url}")
+        # 🎯 RANDOM PICK (NEW)
+        chosen_url = random.choice(video_urls)
+        print("Chosen video:", chosen_url)
 
-            success = goto_with_retry(page, pin_url)
-            if not success:
-                print(f"Could not open pin {i+1}, skipping...")
-                continue
+        goto_with_retry(page, chosen_url)
+        page.wait_for_timeout(6000)
 
-            page.wait_for_timeout(6000)
-
-            for _ in range(8):
-                if stream["url"]:
-                    break
-                page.wait_for_timeout(1000)
-
+        # wait for stream
+        for _ in range(10):
             if stream["url"]:
-                print("Video found!")
                 break
-
-            print("No stream, going back to search...")
-            goto_with_retry(page, search_url)
-            page.wait_for_timeout(WAIT)
-            dismiss_modal(page)
+            page.wait_for_timeout(1000)
 
         browser.close()
 
         if not stream["url"]:
-            print("No video found after trying multiple pins")
+            print("No video stream found")
             sys.exit(1)
 
-        print("Downloading and compressing video...")
+        # 🎬 DOWNLOAD (UNCHANGED)
+        print("Downloading video...")
         os.system(
             f'ffmpeg -y '
             f'-i "{stream["url"]}" '
@@ -196,24 +162,6 @@ def run():
         )
 
         if os.path.exists("output.mp4"):
-            size_mb = os.path.getsize("output.mp4") / (1024 * 1024)
-            print(f"Video size: {size_mb:.1f} MB")
-
-            if size_mb > 100:
-                print("Video still too large, compressing more...")
-                os.system(
-                    f'ffmpeg -y -i output.mp4 '
-                    f'-vf "scale=480:-2" '
-                    f'-c:v libx264 '
-                    f'-crf 32 '
-                    f'-preset fast '
-                    f'-c:a aac '
-                    f'-b:a 96k '
-                    f'output_small.mp4 && mv output_small.mp4 output.mp4'
-                )
-                size_mb = os.path.getsize("output.mp4") / (1024 * 1024)
-                print(f"Compressed video size: {size_mb:.1f} MB")
-
             print("Saved as output.mp4")
         else:
             print("Download failed")
