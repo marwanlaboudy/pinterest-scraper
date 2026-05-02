@@ -8,10 +8,6 @@ query = sys.argv[1]
 IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
 WAIT = 10000 if IS_CI else 4000
 
-def human_type(page, text):
-    for char in text:
-        page.keyboard.type(char, delay=random.randint(50, 120))
-
 def dismiss_modal(page):
     try:
         close = page.locator("[data-test-id='fullPageSignupModal'] [aria-label='Close']")
@@ -20,21 +16,21 @@ def dismiss_modal(page):
             print("Closed modal via X button")
             page.wait_for_timeout(1000)
             return
-    except Exception:
+    except:
         pass
 
     try:
         page.keyboard.press("Escape")
         print("Closed modal via Escape")
         page.wait_for_timeout(1000)
-    except Exception:
+    except:
         pass
 
     try:
         page.mouse.click(10, 10)
         print("Closed modal by clicking outside")
         page.wait_for_timeout(1000)
-    except Exception:
+    except:
         pass
 
 def goto_with_retry(page, url, retries=3, timeout=60000):
@@ -72,7 +68,7 @@ def run():
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        # 🔥 DIRECT VIDEO SEARCH (NEW LOGIC)
+        # 🔥 OPEN VIDEO SEARCH PAGE
         video_url = build_video_url(query)
         print("Opening video search:", video_url)
 
@@ -81,16 +77,16 @@ def run():
 
         dismiss_modal(page)
 
-        # scroll to load videos
+        # scroll to load more
         page.mouse.wheel(0, 2000)
         page.wait_for_timeout(3000)
 
-        # 🎯 CAPTURE STREAM
+        # 🎯 STREAM CAPTURE
         stream = {"url": None}
 
         def handle_response(resp):
             url = resp.url
-            if "_720w.m3u8" in url:
+            if ".m3u8" in url and "pinimg" in url:
                 print("Found stream:", url)
                 stream["url"] = url
 
@@ -119,27 +115,41 @@ def run():
             browser.close()
             sys.exit(1)
 
-        # 🎯 RANDOM PICK (NEW)
-        chosen_url = random.choice(video_urls)
-        print("Chosen video:", chosen_url)
+        # 🔥 RANDOM + RETRY
+        random.shuffle(video_urls)
 
-        goto_with_retry(page, chosen_url)
-        page.wait_for_timeout(6000)
+        found = False
 
-        # wait for stream
-        for _ in range(10):
-            if stream["url"]:
+        for i, chosen_url in enumerate(video_urls):
+            print(f"Trying video {i+1}: {chosen_url}")
+
+            stream["url"] = None
+
+            success = goto_with_retry(page, chosen_url)
+            if not success:
+                continue
+
+            page.wait_for_timeout(6000)
+
+            for _ in range(10):
+                if stream["url"]:
+                    found = True
+                    break
+                page.wait_for_timeout(1000)
+
+            if found:
+                print("Video stream found!")
                 break
-            page.wait_for_timeout(1000)
 
         browser.close()
 
-        if not stream["url"]:
-            print("No video stream found")
+        if not found:
+            print("No working video found after trying all")
             sys.exit(1)
 
         # 🎬 DOWNLOAD (UNCHANGED)
         print("Downloading video...")
+
         os.system(
             f'ffmpeg -y '
             f'-i "{stream["url"]}" '
