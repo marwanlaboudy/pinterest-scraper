@@ -6,7 +6,7 @@ from playwright.sync_api import sync_playwright
 query = sys.argv[1]
 
 IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
-WAIT = 8000 if IS_CI else 4000
+WAIT = 10000 if IS_CI else 4000
 
 def human_type(page, text):
     for char in text:
@@ -30,7 +30,6 @@ def run():
             viewport={"width": 1280, "height": 800}
         )
 
-        # hide webdriver flag from Pinterest JS detection
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         print("Opening Pinterest...")
@@ -45,6 +44,10 @@ def run():
         human_type(page, query)
         page.keyboard.press("Enter")
         page.wait_for_timeout(WAIT)
+
+        # save search URL after search completes
+        search_url = page.url
+        print("Search URL:", search_url)
 
         # scroll to top
         page.mouse.wheel(0, -10000)
@@ -61,26 +64,35 @@ def run():
 
         page.on("response", handle_response)
 
-        # get initial pin count
-        pins = page.locator("div[data-test-id='pin']:visible")
+        # get pin hrefs first — collect all links before clicking anything
+        pins = page.locator("div[data-test-id='pin']:visible a")
         pins.first.wait_for(timeout=20000)
         count = pins.count()
         print(f"Found {count} pins")
 
+        # collect all pin URLs upfront so we never deal with stale locators
+        pin_urls = []
         for i in range(min(count, 10)):
-            print(f"Trying pin {i+1}")
-
-            # re-query pins fresh every iteration to avoid stale locator
-            pins = page.locator("div[data-test-id='pin']:visible")
             try:
-                pins.nth(i).wait_for(timeout=10000)
-                pins.nth(i).click()
-            except Exception as e:
-                print(f"Could not click pin {i+1}: {e}")
+                href = pins.nth(i).get_attribute("href")
+                if href:
+                    full_url = f"https://www.pinterest.com{href}" if href.startswith("/") else href
+                    pin_urls.append(full_url)
+            except Exception:
                 continue
 
-            page.wait_for_timeout(5000)
+        print(f"Collected {len(pin_urls)} pin URLs")
 
+        for i, pin_url in enumerate(pin_urls):
+            print(f"Trying pin {i+1}: {pin_url}")
+
+            try:
+                # navigate directly to pin instead of clicking
+                page.goto(pin_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(6000)
+            except Exception as e:
+                print(f"Could not open pin {i+1}: {e}")
+            
             for _ in range(8):
                 if stream["url"]:
                     break
@@ -90,16 +102,10 @@ def run():
                 print("Video found!")
                 break
 
-            # go back and wait for pins to reload
-            page.go_back()
+            # go back to search results by navigating directly to saved URL
+            print("No stream, going back to search...")
+            page.goto(search_url, wait_until="domcontentloaded")
             page.wait_for_timeout(WAIT)
-
-            # wait for pins to reappear before next iteration
-            try:
-                page.locator("div[data-test-id='pin']:visible").first.wait_for(timeout=15000)
-            except Exception:
-                print("Pins didn't reload in time, stopping.")
-                break
 
         browser.close()
 
