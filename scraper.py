@@ -132,7 +132,7 @@ def run():
         print(f"Found {count} pins")
 
         pin_urls = []
-        for i in range(min(count, 10)):
+        for i in range(min(count, 15)):
             try:
                 href = pins.nth(i).get_attribute("href")
                 if href:
@@ -175,7 +175,9 @@ def run():
 
         print("Downloading and compressing video...")
         os.system(
-            f'ffmpeg -y -i "{stream["url"]}" '
+            f'ffmpeg -y '
+            f'-i "{stream["url"]}" '
+            f'-f lavfi -i anullsrc=r=44100:cl=stereo '
             f'-t 15 '
             f'-vf "scale=720:1280" '
             f'-r 25 '
@@ -188,6 +190,7 @@ def run():
             f'-c:a aac '
             f'-ar 44100 '
             f'-b:a 128k '
+            f'-shortest '
             f'-movflags +faststart '
             f'output.mp4'
         )
