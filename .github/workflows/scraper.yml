@@ -34,25 +34,23 @@ jobs:
         run: |
           xvfb-run python scraper.py "${{ github.event.client_payload.query }}"
 
-      # 🔥 NEW STEP (replaces releases)
+      # ✅ FIXED STEP (overwrite latest.mp4)
       - name: Save video to repo
         run: |
           mkdir -p videos
 
-          FILENAME="video_$(date +%s).mp4"
-          mv output.mp4 videos/$FILENAME
+          FILENAME="latest.mp4"
+          mv -f output.mp4 videos/$FILENAME
 
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
           git add videos/$FILENAME
-          git commit -m "Add video $FILENAME" || echo "No changes"
+          git commit -m "Update latest video" || echo "No changes"
           git push
 
-          echo "VIDEO_NAME=$FILENAME" >> $GITHUB_ENV
-
-      # 🔥 OUTPUT RAW URL (for n8n)
+      # ✅ PRINT FINAL URL (no variable needed)
       - name: Print video URL
         run: |
           echo "VIDEO URL:"
-          echo "https://raw.githubusercontent.com/${{ github.repository }}/main/videos/${VIDEO_NAME}"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/main/videos/latest.mp4"
