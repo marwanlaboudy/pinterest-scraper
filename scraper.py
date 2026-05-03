@@ -43,9 +43,12 @@ def pick_best_m3u8(urls):
 
 
 def extract_from_page_source(page):
-    content = page.content()
-    matches = re.findall(r'https://v1\.pinimg\.com/videos/[^"\']+\.m3u8', content)
-    return matches[0] if matches else None
+    try:
+        content = page.content()
+        matches = re.findall(r'https://v1\.pinimg\.com/videos/[^"\']+\.m3u8', content)
+        return matches[0] if matches else None
+    except:
+        return None
 
 
 def create_button_png(path="shop_now_btn.png"):
@@ -69,7 +72,6 @@ def create_button_png(path="shop_now_btn.png"):
 def run():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-
         context = browser.new_context()
         page = context.new_page()
 
@@ -79,25 +81,24 @@ def run():
         page.wait_for_timeout(WAIT)
         dismiss_modal(page)
 
-        # scroll a bit so pins fully load
+        # scroll to ensure pins load
         page.mouse.wheel(0, 1500)
         page.wait_for_timeout(3000)
 
         pins = page.locator("div[data-test-id='pin']")
         pins.first.wait_for(timeout=20000)
 
-        # ✅ GET ONLY PINS IN VIEWPORT (TOP AREA)
+        # ✅ get visible pins (top viewport)
         visible_pins = []
-
         for i in range(pins.count()):
             try:
                 box = pins.nth(i).bounding_box()
-                if box and box["y"] < 800:  # top of screen
+                if box and box["y"] < 800:
                     visible_pins.append(pins.nth(i))
             except:
                 continue
 
-        # ✅ TAKE FIRST 4 VISUAL PINS
+        # ✅ first 4 visually
         top_pins = visible_pins[:4]
 
         found_url = None
@@ -121,15 +122,27 @@ def run():
                 if not goto_with_retry(page, pin_url):
                     continue
 
-                page.wait_for_timeout(4000)
+                # 🔥 FORCE VIDEO LOAD
+                page.mouse.move(300, 400)
+                page.mouse.wheel(0, 300)
+                page.wait_for_timeout(2000)
 
-                if collected_m3u8:
-                    found_url = pick_best_m3u8(collected_m3u8)
-                    break
+                try:
+                    page.click("video", timeout=3000)
+                except:
+                    pass
 
+                page.wait_for_timeout(3000)
+
+                # ✅ 1. PAGE SOURCE (PRIMARY)
                 src = extract_from_page_source(page)
                 if src:
                     found_url = src
+                    break
+
+                # ✅ 2. NETWORK FALLBACK
+                if collected_m3u8:
+                    found_url = pick_best_m3u8(collected_m3u8)
                     break
 
             except:
