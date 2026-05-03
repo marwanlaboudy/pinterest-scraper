@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
 
 query = sys.argv[1]
+product_title = sys.argv[2] if len(sys.argv) > 2 else query
 WAIT = 8000
 
 FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
@@ -26,6 +27,17 @@ def dismiss_modal(page):
         pass
 
 
+def close_filters(page):
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+        page.mouse.click(640, 300)
+        page.wait_for_timeout(800)
+        log("Closed filter panel")
+    except:
+        pass
+
+
 def goto_with_retry(page, url, retries=3):
     for attempt in range(retries):
         try:
@@ -38,17 +50,44 @@ def goto_with_retry(page, url, retries=3):
     return False
 
 
+def title_matches_product(page, product_title, threshold=0.3):
+    """
+    Read the pin h1 title and compare against product title.
+    Returns True if enough keywords overlap.
+    """
+    try:
+        h1 = page.locator("h1").first
+        pin_title = h1.inner_text(timeout=5000).lower()
+        log(f"Pin title: '{pin_title}'")
+
+        stopwords = {"the", "and", "for", "with", "from", "this", "that", "your", "are"}
+        product_words = set(
+            w for w in re.sub(r'[^a-z0-9 ]', '', product_title.lower()).split()
+            if len(w) > 3 and w not in stopwords
+        )
+
+        matches = sum(1 for w in product_words if w in pin_title)
+        score = matches / len(product_words) if product_words else 0
+
+        log(f"Product keywords: {product_words}")
+        log(f"Matches: {matches}/{len(product_words)} = {score:.0%}")
+
+        return score >= threshold
+
+    except Exception as e:
+        log(f"Title check failed: {e} — allowing pin through")
+        return True  # can't check, allow through
+
+
 def get_best_stream_url(master_url):
-    """
-    Parse the master m3u8 and return the highest bandwidth variant URL.
-    """
+    """Parse the master m3u8 and return the highest bandwidth variant URL."""
     try:
         log(f"Fetching master playlist: {master_url}")
         r = requests.get(master_url, timeout=10, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         lines = r.text.splitlines()
-        log(f"Master playlist contents:\n{r.text[:800]}")
+        log(f"Master playlist:\n{r.text[:800]}")
 
         best_bw = -1
         best_url = None
@@ -72,7 +111,7 @@ def get_best_stream_url(master_url):
             i += 1
 
         if best_url:
-            log(f"Best stream selected: bw={best_bw} -> {best_url}")
+            log(f"Best stream: bw={best_bw} -> {best_url}")
             return best_url
         else:
             log("No variants found, using master directly")
@@ -115,27 +154,23 @@ def extract_m3u8_from_page(page):
             for m in re.findall(pattern, content):
                 clean = m.encode().decode('unicode_escape') if '\\u' in m else m
                 clean = clean.replace('\\/', '/')
-                # Only keep master playlists (no quality suffix, no _audio)
                 if not re.search(r'_\d+w|_audio|h265', clean):
                     found.append(clean)
                     log(f"Found master in HTML: {clean}")
-        return list(dict.fromkeys(found))  # dedupe
+        return list(dict.fromkeys(found))
     except Exception as e:
         log(f"HTML extraction failed: {e}")
         return []
 
 
 def create_button_png(path="shop_now_btn.png"):
-    """Create a large, properly sized SHOP NOW button."""
     W, H = 500, 110
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # White pill button with dark border
     draw.rounded_rectangle([0, 0, W-1, H-1], radius=55, fill=(255, 255, 255, 245))
     draw.rounded_rectangle([0, 0, W-1, H-1], radius=55, outline=(20, 20, 20, 255), width=4)
 
-    # Load real font at large size
     try:
         font = ImageFont.truetype(FONT_PATH, size=48)
     except Exception as e:
@@ -149,9 +184,7 @@ def create_button_png(path="shop_now_btn.png"):
     x = (W - tw) // 2 - bbox[0]
     y = (H - th) // 2 - bbox[1]
 
-    # Subtle shadow
     draw.text((x+2, y+2), text, fill=(100, 100, 100, 180), font=font)
-    # Main text
     draw.text((x, y), text, fill=(20, 20, 20, 255), font=font)
 
     img.save(path)
@@ -161,6 +194,8 @@ def create_button_png(path="shop_now_btn.png"):
 def run():
     with sync_playwright() as p:
         log("Launching browser...")
+        log(f"Query: {query}")
+        log(f"Product title: {product_title}")
 
         browser = p.chromium.launch(
             headless=True,
@@ -194,7 +229,6 @@ def run():
         def on_response(resp):
             try:
                 url = resp.url
-                # Only capture master playlists from network (no quality suffix, no audio)
                 if ".m3u8" in url and "pinimg.com" in url:
                     if not re.search(r'_\d+w|_audio|h265', url):
                         log(f"[NET] Master m3u8: {url}")
@@ -213,6 +247,7 @@ def run():
         page.wait_for_timeout(WAIT)
 
         dismiss_modal(page)
+        close_filters(page)
 
         pins = page.locator("div[data-test-id='pin']")
         pins.first.wait_for(timeout=20000)
@@ -242,8 +277,9 @@ def run():
         for p in pin_data[:8]:
             log(f"  Pin {p['i']} X:{p['x']:.0f} Y:{p['y']:.0f} href:{p['href']}")
 
-        top_hrefs = [p["href"] for p in pin_data[:6]]
-        log(f"\nWill check {len(top_hrefs)} pins in visual order")
+        # Check more pins since some will be filtered by title
+        top_hrefs = [p["href"] for p in pin_data[:10]]
+        log(f"\nWill check up to {len(top_hrefs)} pins in visual order")
 
         found_master = None
 
@@ -258,6 +294,14 @@ def run():
                 if not goto_with_retry(page, pin_url):
                     continue
 
+                page.wait_for_timeout(2000)
+
+                # ✅ Check title match BEFORE waiting for video
+                if not title_matches_product(page, product_title, threshold=0.3):
+                    log("❌ Title mismatch — skipping pin")
+                    continue
+
+                log("✅ Title matches — checking for video...")
                 page.mouse.move(300, 400)
                 page.wait_for_timeout(3000)
 
@@ -285,7 +329,6 @@ def run():
             log("No video found in pins")
             sys.exit(1)
 
-        # ✅ Parse master playlist to get HIGHEST quality stream
         best_video_url = get_best_stream_url(found_master)
         audio_url = get_audio_url(found_master)
 
@@ -295,8 +338,6 @@ def run():
         create_button_png()
         log("Running ffmpeg...")
 
-        # ✅ Force highest quality: -map 0:v:0 picks first (best) video stream
-        # Scale up from source res to 720x1280, button centered near bottom
         if audio_url:
             cmd = (
                 f'ffmpeg -y '
@@ -304,12 +345,10 @@ def run():
                 f'-i "{audio_url}" '
                 f'-i "shop_now_btn.png" '
                 f'-filter_complex '
-                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
-                f'[bg][2:v]overlay=(W-w)/2:H-160" '
-                f'-map "[out]" -map 1:a '
-                f'-filter_complex '
-                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
+                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,'
+                f'pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
                 f'[bg][2:v]overlay=(W-w)/2:H-160[out]" '
+                f'-map "[out]" -map 1:a '
                 f'-c:v libx264 -preset fast -crf 18 '
                 f'-c:a aac -b:a 128k -shortest output.mp4'
             )
@@ -320,7 +359,8 @@ def run():
                 f'-i "shop_now_btn.png" '
                 f'-f lavfi -i anullsrc=r=44100:cl=stereo '
                 f'-filter_complex '
-                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
+                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,'
+                f'pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
                 f'[bg][1:v]overlay=(W-w)/2:H-160[out]" '
                 f'-map "[out]" -map 2:a '
                 f'-c:v libx264 -preset fast -crf 18 '
