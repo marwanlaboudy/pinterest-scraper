@@ -1,5 +1,4 @@
 import sys
-import random
 import os
 import re
 from PIL import Image, ImageDraw, ImageFont
@@ -17,36 +16,21 @@ def dismiss_modal(page):
         if close.is_visible(timeout=3000):
             close.click()
             page.wait_for_timeout(1000)
-            return
-    except Exception:
-        pass
-
-    try:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(1000)
-    except Exception:
-        pass
-
-    try:
-        page.mouse.click(10, 10)
-        page.wait_for_timeout(1000)
-    except Exception:
+    except:
         pass
 
 
-def goto_with_retry(page, url, retries=3, timeout=60000):
+def goto_with_retry(page, url, retries=3):
     for _ in range(retries):
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
             return True
-        except Exception:
-            page.wait_for_timeout(3000)
+        except:
+            page.wait_for_timeout(2000)
     return False
 
 
 def pick_best_m3u8(urls):
-    if not urls:
-        return None
     for u in urls:
         if "_720w" in u:
             return u
@@ -59,48 +43,24 @@ def pick_best_m3u8(urls):
 
 
 def extract_from_page_source(page):
-    try:
-        content = page.content()
-        matches = re.findall(r'https://v1\.pinimg\.com/videos/[^"\']+\.m3u8', content)
-        if matches:
-            return matches[0]
-    except Exception:
-        pass
-    return None
+    content = page.content()
+    matches = re.findall(r'https://v1\.pinimg\.com/videos/[^"\']+\.m3u8', content)
+    return matches[0] if matches else None
 
 
-def create_button_png(path="shop_now_btn.png", width=340, height=90, radius=45):
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+def create_button_png(path="shop_now_btn.png"):
+    img = Image.new("RGBA", (340, 90), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    draw.rounded_rectangle([0, 0, width - 1, height - 1], radius=radius, fill=(255, 255, 255, 255))
-    draw.rounded_rectangle([0, 0, width - 1, height - 1], radius=radius, outline=(30, 30, 30, 255), width=3)
+    draw.rounded_rectangle([0, 0, 339, 89], radius=45, fill=(255, 255, 255, 255))
+    draw.rounded_rectangle([0, 0, 339, 89], radius=45, outline=(30, 30, 30, 255), width=3)
 
-    font = None
-    font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    ]
-
-    for fp in font_paths:
-        if os.path.exists(fp):
-            try:
-                font = ImageFont.truetype(fp, 36)
-                break
-            except Exception:
-                continue
-
-    if font is None:
-        font = ImageFont.load_default()
-
+    font = ImageFont.load_default()
     text = "SHOP NOW"
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
 
-    x = (width - text_w) // 2
-    y = (height - text_h) // 2 - bbox[1]
+    bbox = draw.textbbox((0, 0), text, font=font)
+    x = (340 - (bbox[2] - bbox[0])) // 2
+    y = (90 - (bbox[3] - bbox[1])) // 2
 
     draw.text((x, y), text, fill=(30, 30, 30, 255), font=font)
     img.save(path)
@@ -108,84 +68,60 @@ def create_button_png(path="shop_now_btn.png", width=340, height=90, radius=45):
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--window-size=1280,800",
-            ]
-        )
+        browser = p.chromium.launch(headless=True)
 
-        session_file = "pinterest_session.json"
-
-        if os.path.exists(session_file):
-            context = browser.new_context(
-                storage_state=session_file,
-                user_agent="Mozilla/5.0",
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-        else:
-            context = browser.new_context(
-                user_agent="Mozilla/5.0",
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-            context.add_cookies([{
-                "name": "cpb",
-                "value": "1",
-                "domain": ".pinterest.com",
-                "path": "/",
-            }])
-
+        context = browser.new_context()
         page = context.new_page()
-        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        video_search_url = f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
-        goto_with_retry(page, video_search_url)
+        search_url = f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
+        goto_with_retry(page, search_url)
+
         page.wait_for_timeout(WAIT)
-
         dismiss_modal(page)
 
-        page.mouse.wheel(0, 2000)
+        # scroll a bit so pins fully load
+        page.mouse.wheel(0, 1500)
         page.wait_for_timeout(3000)
 
-        pins = page.locator("div[data-test-id='pin']:visible a")
+        pins = page.locator("div[data-test-id='pin']")
         pins.first.wait_for(timeout=20000)
 
-        # ✅ ONLY FIRST 4 PINS
-        count = min(pins.count(), 4)
+        # ✅ GET ONLY PINS IN VIEWPORT (TOP AREA)
+        visible_pins = []
 
-        collected_m3u8 = []
+        for i in range(pins.count()):
+            try:
+                box = pins.nth(i).bounding_box()
+                if box and box["y"] < 800:  # top of screen
+                    visible_pins.append(pins.nth(i))
+            except:
+                continue
 
-        def handle_response(resp):
-            if ".m3u8" in resp.url:
-                collected_m3u8.append(resp.url)
-
-        page.on("response", handle_response)
+        # ✅ TAKE FIRST 4 VISUAL PINS
+        top_pins = visible_pins[:4]
 
         found_url = None
 
-        # 🔥 CHECK FIRST 4 → PICK FIRST VIDEO
-        for i in range(count):
+        for pin in top_pins:
+            collected_m3u8 = []
+
+            def handle_response(resp):
+                if ".m3u8" in resp.url:
+                    collected_m3u8.append(resp.url)
+
+            page.on("response", handle_response)
+
             try:
-                href = pins.nth(i).get_attribute("href")
+                href = pin.locator("a").get_attribute("href")
                 if not href:
                     continue
 
-                pin_url = f"https://www.pinterest.com{href}" if href.startswith("/") else href
-
-                collected_m3u8.clear()
+                pin_url = f"https://www.pinterest.com{href}"
 
                 if not goto_with_retry(page, pin_url):
                     continue
 
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(4000)
 
                 if collected_m3u8:
                     found_url = pick_best_m3u8(collected_m3u8)
@@ -196,19 +132,19 @@ def run():
                     found_url = src
                     break
 
-            except Exception:
+            except:
                 continue
 
         browser.close()
 
         if not found_url:
-            print("No video found in first 4 pins")
+            print("No video found in first 4 visible pins")
             sys.exit(1)
 
-        print("Generating button...")
+        print("Found video:", found_url)
+
         create_button_png()
 
-        print("Processing video...")
         os.system(
             f'ffmpeg -y '
             f'-i "{found_url}" '
@@ -218,21 +154,17 @@ def run():
             f'-filter_complex '
             f'"[0:v]scale=720:1280[bg];'
             f'[bg][1:v]overlay=(W-w)/2:H-220" '
-            f'-r 25 '
+            f'-r 30 '
             f'-pix_fmt yuv420p '
             f'-c:v libx264 '
-            f'-preset fast '
+            f'-preset veryfast '
             f'-c:a aac '
             f'-b:a 128k '
             f'-shortest '
             f'output.mp4'
         )
 
-        if os.path.exists("output.mp4"):
-            print("Saved as output.mp4")
-        else:
-            print("Failed")
-            sys.exit(1)
+        print("Saved as output.mp4")
 
 
 if __name__ == "__main__":
