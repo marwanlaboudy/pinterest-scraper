@@ -87,6 +87,39 @@ def create_button_png(path="shop_now_btn.png"):
     log("Created CTA button image")
 
 
+def extract_m3u8_from_page(page):
+    """
+    Try to grab the m3u8 URL directly from Pinterest's
+    page JSON data embedded in the HTML (V8 hydration data).
+    This is reliable because it's baked into the HTML before JS runs.
+    """
+    try:
+        content = page.content()
+
+        # Pinterest embeds video URLs in JSON script tags
+        # Look for pinimg.com HLS URLs
+        patterns = [
+            r'(https://v(?:1|2)\.pinimg\.com/videos/[^"\'\\]+\.m3u8)',
+            r'(https://[^"\'\\]*pinimg\.com[^"\'\\]*\.m3u8)',
+        ]
+
+        found = []
+        for pattern in patterns:
+            matches = re.findall(pattern, content)
+            for m in matches:
+                # Unescape unicode escapes like \u002F -> /
+                clean = m.encode().decode('unicode_escape') if '\\u' in m else m
+                # Fix JSON-escaped slashes
+                clean = clean.replace('\\/', '/')
+                found.append(clean)
+                log(f"Found in page HTML: {clean}")
+
+        return found
+    except Exception as e:
+        log(f"HTML extraction failed: {e}")
+        return []
+
+
 def run():
     with sync_playwright() as p:
         log("Launching browser...")
@@ -118,6 +151,20 @@ def run():
 
         page = context.new_page()
 
+        # ✅ Global network interceptor — catches ALL requests for entire session
+        all_m3u8 = []
+
+        def on_response(resp):
+            try:
+                url = resp.url
+                if ".m3u8" in url and "pinimg.com" in url:
+                    log(f"[NET] Caught m3u8: {url}")
+                    all_m3u8.append(url)
+            except:
+                pass
+
+        page.on("response", on_response)
+
         search_url = f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
         goto_with_retry(page, search_url)
 
@@ -132,7 +179,6 @@ def run():
         total = pins.count()
         log(f"Total pins found: {total}")
 
-        # ✅ Collect pins with X,Y positions before any navigation
         pin_data = []
         for i in range(total):
             try:
@@ -150,14 +196,12 @@ def run():
 
         log(f"\nCollected {len(pin_data)} pins")
 
-        # ✅ Sort by visual reading order: group into rows by Y (±100px), then sort by X
         pin_data.sort(key=lambda p: (round(p["y"] / 100) * 100, p["x"]))
 
         log("\nVisual order (first 8):")
         for p in pin_data[:8]:
             log(f"  Pin {p['i']} X:{p['x']:.0f} Y:{p['y']:.0f} href:{p['href']}")
 
-        # Take first 6 in visual order (= first row + start of second row)
         top_hrefs = [p["href"] for p in pin_data[:6]]
         log(f"\nWill check {len(top_hrefs)} pins in visual order")
 
@@ -166,51 +210,47 @@ def run():
 
         for i, href in enumerate(top_hrefs):
             log(f"\n--- PIN {i+1} ---")
+            pin_url = f"https://www.pinterest.com{href}"
+            log(f"Opening pin: {pin_url}")
 
-            collected_m3u8 = []
-
-            def make_handler(collector):
-                def handle_response(resp):
-                    if ".m3u8" in resp.url:
-                        log(f"Detected stream: {resp.url}")
-                        collector.append(resp.url)
-                return handle_response
-
-            handler = make_handler(collected_m3u8)
-
-            # ✅ Listener attached BEFORE navigation
-            page.on("response", handler)
+            # Track m3u8 count before navigation
+            before_count = len(all_m3u8)
 
             try:
-                pin_url = f"https://www.pinterest.com{href}"
-                log(f"Opening pin: {pin_url}")
-
                 if not goto_with_retry(page, pin_url):
                     continue
 
-                log("Waiting for video streams...")
+                # Wait for page + video to load
                 page.mouse.move(300, 400)
-                page.mouse.wheel(0, 300)
-                page.wait_for_timeout(6000)
+                page.wait_for_timeout(3000)
 
-                log(f"Collected {len(collected_m3u8)} streams")
+                # ✅ Method 1: Check network-intercepted URLs since navigation
+                new_urls = all_m3u8[before_count:]
+                log(f"Network captured {len(new_urls)} new streams")
 
-                video_url, audio_url = pick_video_and_audio(collected_m3u8)
-                log(f"Selected video: {video_url}")
-                log(f"Selected audio: {audio_url}")
+                # ✅ Method 2: Extract from page HTML (catches pre-loaded manifests)
+                html_urls = extract_m3u8_from_page(page)
+                log(f"HTML extraction found {len(html_urls)} streams")
 
-                if video_url:
-                    found_video = video_url
-                    found_audio = audio_url
-                    break
+                # Combine both sources
+                combined = list(dict.fromkeys(new_urls + html_urls))  # dedupe, preserve order
+                log(f"Combined unique streams: {len(combined)}")
+
+                if combined:
+                    video_url, audio_url = pick_video_and_audio(combined)
+                    log(f"Selected video: {video_url}")
+                    log(f"Selected audio: {audio_url}")
+
+                    if video_url:
+                        found_video = video_url
+                        found_audio = audio_url
+                        break
+                else:
+                    log("No streams found for this pin")
 
             except Exception as e:
                 log(f"Error: {e}")
-            finally:
-                try:
-                    page.remove_listener("response", handler)
-                except:
-                    pass
+                continue
 
         browser.close()
 
