@@ -10,27 +10,34 @@ IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
 WAIT = 12000 if IS_CI else 5000
 
 
+def log(msg):
+    print(msg, flush=True)
+
+
 def dismiss_modal(page):
     try:
         close = page.locator("[data-test-id='fullPageSignupModal'] [aria-label='Close']")
         if close.is_visible(timeout=3000):
             close.click()
             page.wait_for_timeout(1000)
+            log("Closed signup modal")
     except:
         pass
 
 
 def goto_with_retry(page, url, retries=3):
-    for _ in range(retries):
+    for attempt in range(retries):
         try:
+            log(f"Navigating to: {url}")
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             return True
-        except:
+        except Exception as e:
+            log(f"Goto failed attempt {attempt+1}: {e}")
             page.wait_for_timeout(2000)
     return False
 
 
-# ✅ group URLs and extract best video + audio
+# 🔥 group + pick best video + audio
 def pick_video_and_audio(urls):
     groups = {}
 
@@ -86,16 +93,18 @@ def create_button_png(path="shop_now_btn.png"):
 
     draw.text((x, y), text, fill=(30, 30, 30, 255), font=font)
     img.save(path)
+    log("Created CTA button image")
 
 
 def run():
     with sync_playwright() as p:
+        log("Launching browser...")
+
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
 
-        # ✅ FIXED VIEWPORT (matches VS behavior)
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0"
@@ -106,78 +115,98 @@ def run():
         search_url = f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
         goto_with_retry(page, search_url)
 
+        log("Waiting for initial load...")
         page.wait_for_timeout(WAIT)
+
         dismiss_modal(page)
 
-        # small scroll just to ensure loading
+        log("Scrolling page slightly...")
         page.mouse.wheel(0, 800)
         page.wait_for_timeout(3000)
 
         pins = page.locator("div[data-test-id='pin']")
         pins.first.wait_for(timeout=20000)
 
+        total = pins.count()
+        log(f"Total pins found: {total}")
+
         visible_pins = []
-        for i in range(pins.count()):
+        for i in range(total):
             try:
                 box = pins.nth(i).bounding_box()
+                if box:
+                    log(f"Pin {i} Y: {box['y']}")
                 if box and 0 < box["y"] < 600:
                     visible_pins.append(pins.nth(i))
             except:
                 continue
 
-        # ✅ take more pins for reliability in CI
+        log(f"Visible pins: {len(visible_pins)}")
+
         top_pins = visible_pins[:6]
+        log(f"Checking {len(top_pins)} pins...")
 
         found_video = None
         found_audio = None
 
-        for pin in top_pins:
+        for i, pin in enumerate(top_pins):
+            log(f"\n--- PIN {i+1} ---")
+
             collected_m3u8 = []
 
             def handle_response(resp):
                 if ".m3u8" in resp.url:
+                    log(f"Detected stream: {resp.url}")
                     collected_m3u8.append(resp.url)
 
-            # attach listener fresh each loop
             page.on("response", handle_response)
 
             try:
                 href = pin.locator("a").first.get_attribute("href")
                 if not href:
+                    log("No href found")
                     continue
 
                 pin_url = f"https://www.pinterest.com{href}"
+                log(f"Opening pin: {pin_url}")
 
                 if not goto_with_retry(page, pin_url):
                     continue
 
-                # force video load
+                log("Forcing video load...")
                 page.mouse.move(300, 400)
                 page.mouse.wheel(0, 300)
                 page.wait_for_timeout(6000)
 
+                log(f"Collected {len(collected_m3u8)} streams")
+
                 video_url, audio_url = pick_video_and_audio(collected_m3u8)
+
+                log(f"Selected video: {video_url}")
+                log(f"Selected audio: {audio_url}")
 
                 if video_url:
                     found_video = video_url
                     found_audio = audio_url
                     break
 
-            except:
+            except Exception as e:
+                log(f"Error: {e}")
                 continue
 
         browser.close()
 
         if not found_video:
-            print("No video found in first pins")
+            log("No video found in pins")
             sys.exit(1)
 
-        print("Video:", found_video)
-        print("Audio:", found_audio)
+        log(f"FINAL VIDEO: {found_video}")
+        log(f"FINAL AUDIO: {found_audio}")
 
         create_button_png()
 
-        # ✅ FFMPEG MERGE (with fallback)
+        log("Running ffmpeg...")
+
         if found_audio:
             cmd = (
                 f'ffmpeg -y '
@@ -201,9 +230,15 @@ def run():
                 f'-c:a aac -shortest output.mp4'
             )
 
+        log(f"FFmpeg command:\n{cmd}")
+
         os.system(cmd)
 
-        print("Saved as output.mp4")
+        if os.path.exists("output.mp4"):
+            log("Saved as output.mp4")
+        else:
+            log("FFmpeg failed")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
