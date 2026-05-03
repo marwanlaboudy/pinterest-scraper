@@ -16,7 +16,7 @@ def log(msg):
     print(msg, flush=True)
 
 
-# 🔥 NEW: status writer
+# 🔥 ADDED
 def write_status(status):
     with open("status.txt", "w") as f:
         f.write(status)
@@ -28,6 +28,7 @@ def dismiss_modal(page):
         if close.is_visible(timeout=3000):
             close.click()
             page.wait_for_timeout(1000)
+            log("Closed signup modal")
     except:
         pass
 
@@ -38,18 +39,132 @@ def close_filters(page):
         page.wait_for_timeout(800)
         page.mouse.click(640, 300)
         page.wait_for_timeout(800)
+        log("Closed filter panel")
     except:
         pass
 
 
 def goto_with_retry(page, url, retries=3):
-    for _ in range(retries):
+    for attempt in range(retries):
         try:
+            log(f"Navigating to: {url}")
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             return True
-        except:
+        except Exception as e:
+            log(f"Goto failed attempt {attempt+1}: {e}")
             page.wait_for_timeout(2000)
     return False
+
+
+def title_matches_product(page, product_title):
+    try:
+        h1 = page.locator("h1").first
+        pin_title = h1.inner_text(timeout=5000).lower()
+        log(f"Pin title: '{pin_title}'")
+
+        stopwords = {
+            "the", "and", "for", "with", "from", "this", "that", "your", "are",
+            "its", "into", "have", "has", "was", "will", "can", "not", "but",
+            "also", "more", "than", "then", "when", "what", "which", "who"
+        }
+
+        product_words = [
+            w for w in re.sub(r'[^a-z0-9 ]', '', product_title.lower()).split()
+            if len(w) > 2 and w not in stopwords
+        ]
+
+        log(f"Checking keywords: {product_words}")
+
+        matches = sum(1 for w in product_words if w in pin_title)
+        log(f"Matches: {matches}/{len(product_words)} — need > 3")
+
+        return matches > 3
+
+    except Exception as e:
+        log(f"Title check failed: {e} — allowing pin through")
+        return True
+
+
+def get_best_stream_url(master_url):
+    try:
+        log(f"Fetching master playlist: {master_url}")
+        r = requests.get(master_url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        lines = r.text.splitlines()
+        log(f"Master playlist:\n{r.text[:800]}")
+
+        best_bw = -1
+        best_url = None
+        base = master_url.rsplit("/", 1)[0]
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("#EXT-X-STREAM-INF"):
+                bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+                bw = int(bw_match.group(1)) if bw_match else 0
+                res_match = re.search(r'RESOLUTION=(\d+x\d+)', line)
+                res = res_match.group(1) if res_match else "?"
+                next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                if next_line and not next_line.startswith("#"):
+                    url = next_line if next_line.startswith("http") else f"{base}/{next_line}"
+                    log(f"  Stream: {res} bw={bw} -> {url}")
+                    if bw > best_bw:
+                        best_bw = bw
+                        best_url = url
+            i += 1
+
+        if best_url:
+            log(f"Best stream: bw={best_bw} -> {best_url}")
+            return best_url
+        else:
+            log("No variants found, using master directly")
+            return master_url
+
+    except Exception as e:
+        log(f"Failed to parse master m3u8: {e}")
+        return master_url
+
+
+def get_audio_url(master_url):
+    try:
+        r = requests.get(master_url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        base = master_url.rsplit("/", 1)[0]
+        for line in r.text.splitlines():
+            if '#EXT-X-MEDIA' in line and 'TYPE=AUDIO' in line:
+                uri_match = re.search(r'URI="([^"]+)"', line)
+                if uri_match:
+                    uri = uri_match.group(1)
+                    audio_url = uri if uri.startswith("http") else f"{base}/{uri}"
+                    log(f"Audio stream: {audio_url}")
+                    return audio_url
+    except Exception as e:
+        log(f"Audio extraction failed: {e}")
+    return None
+
+
+def extract_m3u8_from_page(page):
+    try:
+        content = page.content()
+        patterns = [
+            r'(https://v(?:1|2)\.pinimg\.com/videos/[^"\'\\]+\.m3u8)',
+            r'(https://[^"\'\\]*pinimg\.com[^"\'\\]*\.m3u8)',
+        ]
+        found = []
+        for pattern in patterns:
+            for m in re.findall(pattern, content):
+                clean = m.encode().decode('unicode_escape') if '\\u' in m else m
+                clean = clean.replace('\\/', '/')
+                if not re.search(r'_\d+w|_audio|h265', clean):
+                    found.append(clean)
+                    log(f"Found master in HTML: {clean}")
+        return list(dict.fromkeys(found))
+    except Exception as e:
+        log(f"HTML extraction failed: {e}")
+        return []
 
 
 def create_button_png(path="shop_now_btn.png"):
@@ -62,28 +177,77 @@ def create_button_png(path="shop_now_btn.png"):
 
     try:
         font = ImageFont.truetype(FONT_PATH, size=48)
-    except:
+    except Exception as e:
+        log(f"Font load failed: {e}, using fallback")
         font = ImageFont.load_default()
 
     text = "SHOP NOW"
     bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = (W - tw) // 2 - bbox[0]
+    y = (H - th) // 2 - bbox[1]
 
-    x = (W - (bbox[2] - bbox[0])) // 2
-    y = (H - (bbox[3] - bbox[1])) // 2
-
+    draw.text((x+2, y+2), text, fill=(100, 100, 100, 180), font=font)
     draw.text((x, y), text, fill=(20, 20, 20, 255), font=font)
+
     img.save(path)
+    log(f"Created button: {W}x{H}px")
 
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = browser.new_context()
+        log("Launching browser...")
+        log(f"Query: {query}")
+        log(f"Product title: {product_title}")
+
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ]
+        )
+
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+            timezone_id="America/New_York",
+            java_script_enabled=True,
+        )
+
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
         page = context.new_page()
+
+        all_m3u8 = []
+
+        def on_response(resp):
+            try:
+                url = resp.url
+                if ".m3u8" in url and "pinimg.com" in url:
+                    if not re.search(r'_\d+w|_audio|h265', url):
+                        log(f"[NET] Master m3u8: {url}")
+                        all_m3u8.append(url)
+                    else:
+                        log(f"[NET] Skipping variant: {url}")
+            except:
+                pass
+
+        page.on("response", on_response)
 
         search_url = f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
         goto_with_retry(page, search_url)
 
+        log("Waiting for initial load...")
         page.wait_for_timeout(WAIT)
 
         dismiss_modal(page)
@@ -92,57 +256,95 @@ def run():
         pins = page.locator("div[data-test-id='pin']")
         pins.first.wait_for(timeout=20000)
 
-        found_video = None
+        total = pins.count()
+        log(f"Total pins found: {total}")
 
-        for i in range(min(10, pins.count())):
+        pin_data = []
+        for i in range(total):
             try:
-                href = pins.nth(i).locator("a").first.get_attribute("href")
-                if not href:
+                box = pins.nth(i).bounding_box()
+                if not box:
+                    continue
+                x, y = box["x"], box["y"]
+                log(f"Pin {i} X:{x:.0f} Y:{y:.0f}")
+                href = pins.nth(i).locator("a").first.get_attribute("href", timeout=3000)
+                if href:
+                    pin_data.append({"i": i, "x": x, "y": y, "href": href})
+            except Exception as e:
+                log(f"Pin {i} failed: {e}")
+                continue
+
+        log(f"\nCollected {len(pin_data)} pins")
+        pin_data.sort(key=lambda p: (round(p["y"] / 100) * 100, p["x"]))
+
+        log("\nVisual order (first 8):")
+        for p in pin_data[:8]:
+            log(f"  Pin {p['i']} X:{p['x']:.0f} Y:{p['y']:.0f} href:{p['href']}")
+
+        top_hrefs = [p["href"] for p in pin_data[:10]]
+        log(f"\nWill check up to {len(top_hrefs)} pins in visual order")
+
+        found_master = None
+
+        for i, href in enumerate(top_hrefs):
+            log(f"\n--- PIN {i+1} ---")
+            pin_url = f"https://www.pinterest.com{href}"
+            log(f"Opening pin: {pin_url}")
+
+            before_count = len(all_m3u8)
+
+            try:
+                if not goto_with_retry(page, pin_url):
                     continue
 
-                page.goto(f"https://www.pinterest.com{href}")
+                page.wait_for_timeout(2000)
+
+                if not title_matches_product(page, product_title):
+                    log("❌ Title mismatch — skipping pin")
+                    continue
+
+                log("✅ Title matches — checking for video...")
+                page.mouse.move(300, 400)
                 page.wait_for_timeout(3000)
 
-                content = page.content()
+                new_urls = all_m3u8[before_count:]
+                html_urls = extract_m3u8_from_page(page)
+                combined = list(dict.fromkeys(new_urls + html_urls))
 
-                match = re.search(r'(https://[^"]+\.m3u8)', content)
-                if match:
-                    found_video = match.group(1)
+                if combined:
+                    found_master = combined[0]
                     break
 
-            except:
+            except Exception as e:
+                log(f"Error: {e}")
                 continue
 
         browser.close()
 
-        # ❌ NO VIDEO FOUND
-        if not found_video:
-            log("No video found")
+        if not found_master:
+            log("No video found in pins")
             write_status("NOT_FOUND")
             return
 
-        # ✅ VIDEO FOUND
-        log("Video found")
+        best_video_url = get_best_stream_url(found_master)
+        audio_url = get_audio_url(found_master)
 
         create_button_png()
 
-        cmd = (
-            f'ffmpeg -y -i "{found_video}" -i shop_now_btn.png '
-            f'-filter_complex "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,'
-            f'pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
-            f'[bg][1:v]overlay=(W-w)/2:H-160[out]" '
-            f'-map "[out]" -c:v libx264 -preset fast -crf 18 output.mp4'
-        )
+        if audio_url:
+            cmd = f'ffmpeg -y -i "{best_video_url}" -i "{audio_url}" -i shop_now_btn.png -filter_complex "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];[bg][2:v]overlay=(W-w)/2:H-160[out]" -map "[out]" -map 1:a -c:v libx264 -c:a aac output.mp4'
+        else:
+            cmd = f'ffmpeg -y -i "{best_video_url}" -i shop_now_btn.png -filter_complex "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];[bg][1:v]overlay=(W-w)/2:H-160[out]" -map "[out]" -c:v libx264 output.mp4'
 
         os.system(cmd)
 
-        # ✅ SUCCESS / FAIL
         if os.path.exists("output.mp4"):
-            log("Saved output.mp4")
+            log("Saved as output.mp4")
             write_status("FOUND")
         else:
             log("FFmpeg failed")
             write_status("FAILED")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
