@@ -5,9 +5,7 @@ from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
 
 query = sys.argv[1]
-
-IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
-WAIT = 12000 if IS_CI else 5000
+WAIT = 8000
 
 
 def log(msg):
@@ -37,10 +35,8 @@ def goto_with_retry(page, url, retries=3):
     return False
 
 
-# 🔥 group + pick best video + audio
 def pick_video_and_audio(urls):
     groups = {}
-
     for u in urls:
         m = re.search(r'/([a-f0-9]{32})', u)
         if m:
@@ -51,7 +47,6 @@ def pick_video_and_audio(urls):
         return None, None
 
     group = list(groups.values())[0]
-
     video_url = None
     audio_url = None
 
@@ -80,17 +75,13 @@ def pick_video_and_audio(urls):
 def create_button_png(path="shop_now_btn.png"):
     img = Image.new("RGBA", (340, 90), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-
     draw.rounded_rectangle([0, 0, 339, 89], radius=45, fill=(255, 255, 255, 255))
     draw.rounded_rectangle([0, 0, 339, 89], radius=45, outline=(30, 30, 30, 255), width=3)
-
     font = ImageFont.load_default()
     text = "SHOP NOW"
-
     bbox = draw.textbbox((0, 0), text, font=font)
     x = (340 - (bbox[2] - bbox[0])) // 2
     y = (90 - (bbox[3] - bbox[1])) // 2
-
     draw.text((x, y), text, fill=(30, 30, 30, 255), font=font)
     img.save(path)
     log("Created CTA button image")
@@ -102,12 +93,27 @@ def run():
 
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ]
         )
 
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0"
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+            timezone_id="America/New_York",
+            java_script_enabled=True,
+        )
+
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
         page = context.new_page()
@@ -120,60 +126,69 @@ def run():
 
         dismiss_modal(page)
 
-        log("Scrolling page slightly...")
-        page.mouse.wheel(0, 800)
-        page.wait_for_timeout(3000)
-
         pins = page.locator("div[data-test-id='pin']")
         pins.first.wait_for(timeout=20000)
 
         total = pins.count()
         log(f"Total pins found: {total}")
 
-        visible_pins = []
+        # ✅ Collect pins with X,Y positions before any navigation
+        pin_data = []
         for i in range(total):
             try:
                 box = pins.nth(i).bounding_box()
-                if box:
-                    log(f"Pin {i} Y: {box['y']}")
-                if box and 0 < box["y"] < 600:
-                    visible_pins.append(pins.nth(i))
-            except:
+                if not box:
+                    continue
+                x, y = box["x"], box["y"]
+                log(f"Pin {i} X:{x:.0f} Y:{y:.0f}")
+                href = pins.nth(i).locator("a").first.get_attribute("href", timeout=3000)
+                if href:
+                    pin_data.append({"i": i, "x": x, "y": y, "href": href})
+            except Exception as e:
+                log(f"Pin {i} failed: {e}")
                 continue
 
-        log(f"Visible pins: {len(visible_pins)}")
+        log(f"\nCollected {len(pin_data)} pins")
 
-        top_pins = visible_pins[:6]
-        log(f"Checking {len(top_pins)} pins...")
+        # ✅ Sort by visual reading order: group into rows by Y (±100px), then sort by X
+        pin_data.sort(key=lambda p: (round(p["y"] / 100) * 100, p["x"]))
+
+        log("\nVisual order (first 8):")
+        for p in pin_data[:8]:
+            log(f"  Pin {p['i']} X:{p['x']:.0f} Y:{p['y']:.0f} href:{p['href']}")
+
+        # Take first 6 in visual order (= first row + start of second row)
+        top_hrefs = [p["href"] for p in pin_data[:6]]
+        log(f"\nWill check {len(top_hrefs)} pins in visual order")
 
         found_video = None
         found_audio = None
 
-        for i, pin in enumerate(top_pins):
+        for i, href in enumerate(top_hrefs):
             log(f"\n--- PIN {i+1} ---")
 
             collected_m3u8 = []
 
-            def handle_response(resp):
-                if ".m3u8" in resp.url:
-                    log(f"Detected stream: {resp.url}")
-                    collected_m3u8.append(resp.url)
+            def make_handler(collector):
+                def handle_response(resp):
+                    if ".m3u8" in resp.url:
+                        log(f"Detected stream: {resp.url}")
+                        collector.append(resp.url)
+                return handle_response
 
-            page.on("response", handle_response)
+            handler = make_handler(collected_m3u8)
+
+            # ✅ Listener attached BEFORE navigation
+            page.on("response", handler)
 
             try:
-                href = pin.locator("a").first.get_attribute("href")
-                if not href:
-                    log("No href found")
-                    continue
-
                 pin_url = f"https://www.pinterest.com{href}"
                 log(f"Opening pin: {pin_url}")
 
                 if not goto_with_retry(page, pin_url):
                     continue
 
-                log("Forcing video load...")
+                log("Waiting for video streams...")
                 page.mouse.move(300, 400)
                 page.mouse.wheel(0, 300)
                 page.wait_for_timeout(6000)
@@ -181,7 +196,6 @@ def run():
                 log(f"Collected {len(collected_m3u8)} streams")
 
                 video_url, audio_url = pick_video_and_audio(collected_m3u8)
-
                 log(f"Selected video: {video_url}")
                 log(f"Selected audio: {audio_url}")
 
@@ -192,7 +206,11 @@ def run():
 
             except Exception as e:
                 log(f"Error: {e}")
-                continue
+            finally:
+                try:
+                    page.remove_listener("response", handler)
+                except:
+                    pass
 
         browser.close()
 
@@ -204,7 +222,6 @@ def run():
         log(f"FINAL AUDIO: {found_audio}")
 
         create_button_png()
-
         log("Running ffmpeg...")
 
         if found_audio:
@@ -231,7 +248,6 @@ def run():
             )
 
         log(f"FFmpeg command:\n{cmd}")
-
         os.system(cmd)
 
         if os.path.exists("output.mp4"):
