@@ -1,36 +1,58 @@
 name: Pinterest Scraper
+
 on:
   repository_dispatch:
     types: [run-scraper]
+
 permissions:
   contents: write
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
       - name: Load Pinterest session
         run: |
           echo "${{ secrets.PINTEREST_SESSION }}" | base64 -d > pinterest_session.json
+
       - name: Set git remote with token
         run: |
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg python3 python3-pip xvfb fonts-dejavu-core
           pip install playwright Pillow
           playwright install --with-deps
+
       - name: Run scraper
         run: |
           xvfb-run python scraper.py "${{ github.event.client_payload.query }}"
-      - name: Save video as GitHub Release
+
+      # 🔥 NEW STEP (replaces releases)
+      - name: Save video to repo
         run: |
-          gh release delete latest-video --yes 2>/dev/null || true
-          gh release create latest-video output.mp4 \
-            --title "Latest Video" \
-            --notes "Auto-generated" \
-            --latest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          mkdir -p videos
+
+          FILENAME="video_$(date +%s).mp4"
+          mv output.mp4 videos/$FILENAME
+
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add videos/$FILENAME
+          git commit -m "Add video $FILENAME" || echo "No changes"
+          git push
+
+          echo "VIDEO_NAME=$FILENAME" >> $GITHUB_ENV
+
+      # 🔥 OUTPUT RAW URL (for n8n)
+      - name: Print video URL
+        run: |
+          echo "VIDEO URL:"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/main/videos/${VIDEO_NAME}"
