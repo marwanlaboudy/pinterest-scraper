@@ -1,11 +1,14 @@
 import sys
 import os
 import re
+import requests
 from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
 
 query = sys.argv[1]
 WAIT = 8000
+
+FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
 
 
 def log(msg):
@@ -35,89 +38,124 @@ def goto_with_retry(page, url, retries=3):
     return False
 
 
-def pick_video_and_audio(urls):
-    groups = {}
-    for u in urls:
-        m = re.search(r'/([a-f0-9]{32})', u)
-        if m:
-            vid = m.group(1)
-            groups.setdefault(vid, []).append(u)
+def get_best_stream_url(master_url):
+    """
+    Parse the master m3u8 and return the highest bandwidth variant URL.
+    """
+    try:
+        log(f"Fetching master playlist: {master_url}")
+        r = requests.get(master_url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        lines = r.text.splitlines()
+        log(f"Master playlist contents:\n{r.text[:800]}")
 
-    if not groups:
-        return None, None
+        best_bw = -1
+        best_url = None
+        base = master_url.rsplit("/", 1)[0]
 
-    group = list(groups.values())[0]
-    video_url = None
-    audio_url = None
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("#EXT-X-STREAM-INF"):
+                bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+                bw = int(bw_match.group(1)) if bw_match else 0
+                res_match = re.search(r'RESOLUTION=(\d+x\d+)', line)
+                res = res_match.group(1) if res_match else "?"
+                next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                if next_line and not next_line.startswith("#"):
+                    url = next_line if next_line.startswith("http") else f"{base}/{next_line}"
+                    log(f"  Stream: {res} bw={bw} -> {url}")
+                    if bw > best_bw:
+                        best_bw = bw
+                        best_url = url
+            i += 1
 
-    for q in ["_720w", "_540w", "_480w", "_360w", "_240w"]:
-        for u in group:
-            if q in u:
-                video_url = u
-                break
-        if video_url:
-            break
+        if best_url:
+            log(f"Best stream selected: bw={best_bw} -> {best_url}")
+            return best_url
+        else:
+            log("No variants found, using master directly")
+            return master_url
 
-    if not video_url:
-        for u in group:
-            if "_audio" not in u:
-                video_url = u
-                break
-
-    for u in group:
-        if "_audio" in u:
-            audio_url = u
-            break
-
-    return video_url, audio_url
+    except Exception as e:
+        log(f"Failed to parse master m3u8: {e}")
+        return master_url
 
 
-def create_button_png(path="shop_now_btn.png"):
-    img = Image.new("RGBA", (340, 90), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([0, 0, 339, 89], radius=45, fill=(255, 255, 255, 255))
-    draw.rounded_rectangle([0, 0, 339, 89], radius=45, outline=(30, 30, 30, 255), width=3)
-    font = ImageFont.load_default()
-    text = "SHOP NOW"
-    bbox = draw.textbbox((0, 0), text, font=font)
-    x = (340 - (bbox[2] - bbox[0])) // 2
-    y = (90 - (bbox[3] - bbox[1])) // 2
-    draw.text((x, y), text, fill=(30, 30, 30, 255), font=font)
-    img.save(path)
-    log("Created CTA button image")
+def get_audio_url(master_url):
+    """Extract audio stream URL from master playlist."""
+    try:
+        r = requests.get(master_url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        base = master_url.rsplit("/", 1)[0]
+        for line in r.text.splitlines():
+            if '#EXT-X-MEDIA' in line and 'TYPE=AUDIO' in line:
+                uri_match = re.search(r'URI="([^"]+)"', line)
+                if uri_match:
+                    uri = uri_match.group(1)
+                    audio_url = uri if uri.startswith("http") else f"{base}/{uri}"
+                    log(f"Audio stream: {audio_url}")
+                    return audio_url
+    except Exception as e:
+        log(f"Audio extraction failed: {e}")
+    return None
 
 
 def extract_m3u8_from_page(page):
-    """
-    Try to grab the m3u8 URL directly from Pinterest's
-    page JSON data embedded in the HTML (V8 hydration data).
-    This is reliable because it's baked into the HTML before JS runs.
-    """
     try:
         content = page.content()
-
-        # Pinterest embeds video URLs in JSON script tags
-        # Look for pinimg.com HLS URLs
         patterns = [
             r'(https://v(?:1|2)\.pinimg\.com/videos/[^"\'\\]+\.m3u8)',
             r'(https://[^"\'\\]*pinimg\.com[^"\'\\]*\.m3u8)',
         ]
-
         found = []
         for pattern in patterns:
-            matches = re.findall(pattern, content)
-            for m in matches:
-                # Unescape unicode escapes like \u002F -> /
+            for m in re.findall(pattern, content):
                 clean = m.encode().decode('unicode_escape') if '\\u' in m else m
-                # Fix JSON-escaped slashes
                 clean = clean.replace('\\/', '/')
-                found.append(clean)
-                log(f"Found in page HTML: {clean}")
-
-        return found
+                # Only keep master playlists (no quality suffix, no _audio)
+                if not re.search(r'_\d+w|_audio|h265', clean):
+                    found.append(clean)
+                    log(f"Found master in HTML: {clean}")
+        return list(dict.fromkeys(found))  # dedupe
     except Exception as e:
         log(f"HTML extraction failed: {e}")
         return []
+
+
+def create_button_png(path="shop_now_btn.png"):
+    """Create a large, properly sized SHOP NOW button."""
+    W, H = 500, 110
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # White pill button with dark border
+    draw.rounded_rectangle([0, 0, W-1, H-1], radius=55, fill=(255, 255, 255, 245))
+    draw.rounded_rectangle([0, 0, W-1, H-1], radius=55, outline=(20, 20, 20, 255), width=4)
+
+    # Load real font at large size
+    try:
+        font = ImageFont.truetype(FONT_PATH, size=48)
+    except Exception as e:
+        log(f"Font load failed: {e}, using fallback")
+        font = ImageFont.load_default()
+
+    text = "SHOP NOW"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = (W - tw) // 2 - bbox[0]
+    y = (H - th) // 2 - bbox[1]
+
+    # Subtle shadow
+    draw.text((x+2, y+2), text, fill=(100, 100, 100, 180), font=font)
+    # Main text
+    draw.text((x, y), text, fill=(20, 20, 20, 255), font=font)
+
+    img.save(path)
+    log(f"Created button: {W}x{H}px")
 
 
 def run():
@@ -151,15 +189,18 @@ def run():
 
         page = context.new_page()
 
-        # ✅ Global network interceptor — catches ALL requests for entire session
         all_m3u8 = []
 
         def on_response(resp):
             try:
                 url = resp.url
+                # Only capture master playlists from network (no quality suffix, no audio)
                 if ".m3u8" in url and "pinimg.com" in url:
-                    log(f"[NET] Caught m3u8: {url}")
-                    all_m3u8.append(url)
+                    if not re.search(r'_\d+w|_audio|h265', url):
+                        log(f"[NET] Master m3u8: {url}")
+                        all_m3u8.append(url)
+                    else:
+                        log(f"[NET] Skipping variant: {url}")
             except:
                 pass
 
@@ -195,7 +236,6 @@ def run():
                 continue
 
         log(f"\nCollected {len(pin_data)} pins")
-
         pin_data.sort(key=lambda p: (round(p["y"] / 100) * 100, p["x"]))
 
         log("\nVisual order (first 8):")
@@ -205,48 +245,35 @@ def run():
         top_hrefs = [p["href"] for p in pin_data[:6]]
         log(f"\nWill check {len(top_hrefs)} pins in visual order")
 
-        found_video = None
-        found_audio = None
+        found_master = None
 
         for i, href in enumerate(top_hrefs):
             log(f"\n--- PIN {i+1} ---")
             pin_url = f"https://www.pinterest.com{href}"
             log(f"Opening pin: {pin_url}")
 
-            # Track m3u8 count before navigation
             before_count = len(all_m3u8)
 
             try:
                 if not goto_with_retry(page, pin_url):
                     continue
 
-                # Wait for page + video to load
                 page.mouse.move(300, 400)
                 page.wait_for_timeout(3000)
 
-                # ✅ Method 1: Check network-intercepted URLs since navigation
                 new_urls = all_m3u8[before_count:]
-                log(f"Network captured {len(new_urls)} new streams")
+                log(f"Network captured {len(new_urls)} new master streams")
 
-                # ✅ Method 2: Extract from page HTML (catches pre-loaded manifests)
                 html_urls = extract_m3u8_from_page(page)
-                log(f"HTML extraction found {len(html_urls)} streams")
+                log(f"HTML extraction found {len(html_urls)} master streams")
 
-                # Combine both sources
-                combined = list(dict.fromkeys(new_urls + html_urls))  # dedupe, preserve order
-                log(f"Combined unique streams: {len(combined)}")
+                combined = list(dict.fromkeys(new_urls + html_urls))
+                log(f"Combined unique masters: {len(combined)}")
 
                 if combined:
-                    video_url, audio_url = pick_video_and_audio(combined)
-                    log(f"Selected video: {video_url}")
-                    log(f"Selected audio: {audio_url}")
-
-                    if video_url:
-                        found_video = video_url
-                        found_audio = audio_url
-                        break
-                else:
-                    log("No streams found for this pin")
+                    found_master = combined[0]
+                    log(f"Using master: {found_master}")
+                    break
 
             except Exception as e:
                 log(f"Error: {e}")
@@ -254,37 +281,50 @@ def run():
 
         browser.close()
 
-        if not found_video:
+        if not found_master:
             log("No video found in pins")
             sys.exit(1)
 
-        log(f"FINAL VIDEO: {found_video}")
-        log(f"FINAL AUDIO: {found_audio}")
+        # ✅ Parse master playlist to get HIGHEST quality stream
+        best_video_url = get_best_stream_url(found_master)
+        audio_url = get_audio_url(found_master)
+
+        log(f"FINAL VIDEO STREAM: {best_video_url}")
+        log(f"FINAL AUDIO STREAM: {audio_url}")
 
         create_button_png()
         log("Running ffmpeg...")
 
-        if found_audio:
+        # ✅ Force highest quality: -map 0:v:0 picks first (best) video stream
+        # Scale up from source res to 720x1280, button centered near bottom
+        if audio_url:
             cmd = (
                 f'ffmpeg -y '
-                f'-i "{found_video}" '
-                f'-i "{found_audio}" '
+                f'-i "{best_video_url}" '
+                f'-i "{audio_url}" '
                 f'-i "shop_now_btn.png" '
                 f'-filter_complex '
-                f'"[0:v]scale=720:1280[bg];[bg][2:v]overlay=(W-w)/2:H-220" '
-                f'-c:v libx264 -preset fast '
-                f'-c:a aac -shortest output.mp4'
+                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
+                f'[bg][2:v]overlay=(W-w)/2:H-160" '
+                f'-map "[out]" -map 1:a '
+                f'-filter_complex '
+                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
+                f'[bg][2:v]overlay=(W-w)/2:H-160[out]" '
+                f'-c:v libx264 -preset fast -crf 18 '
+                f'-c:a aac -b:a 128k -shortest output.mp4'
             )
         else:
             cmd = (
                 f'ffmpeg -y '
-                f'-i "{found_video}" '
+                f'-i "{best_video_url}" '
                 f'-i "shop_now_btn.png" '
                 f'-f lavfi -i anullsrc=r=44100:cl=stereo '
                 f'-filter_complex '
-                f'"[0:v]scale=720:1280[bg];[bg][1:v]overlay=(W-w)/2:H-220" '
-                f'-c:v libx264 -preset fast '
-                f'-c:a aac -shortest output.mp4'
+                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
+                f'[bg][1:v]overlay=(W-w)/2:H-160[out]" '
+                f'-map "[out]" -map 2:a '
+                f'-c:v libx264 -preset fast -crf 18 '
+                f'-c:a aac -b:a 128k -shortest output.mp4'
             )
 
         log(f"FFmpeg command:\n{cmd}")
