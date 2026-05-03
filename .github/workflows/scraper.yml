@@ -43,10 +43,4 @@ jobs:
           git commit -m "Update latest video" || echo "No changes"
           git push
 
-      - name: Notify n8n with video URL
-        run: |
-          VIDEO_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/videos/latest.mp4"
-          echo "VIDEO URL: $VIDEO_URL"
-          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"video_url\": \"$VIDEO_URL\"}"
+     
