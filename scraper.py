@@ -297,7 +297,7 @@ def run():
                 page.wait_for_timeout(2000)
 
                 # ✅ Check title match BEFORE waiting for video
-                if not title_matches_product(page, product_title, threshold=0.3):
+                if not title_matches_product(page, product_title):
                     log("❌ Title mismatch — skipping pin")
                     continue
 
