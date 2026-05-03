@@ -30,16 +30,47 @@ def goto_with_retry(page, url, retries=3):
     return False
 
 
-def pick_best_m3u8(urls):
+# 🔥 NEW: extract video + audio together
+def pick_video_and_audio(urls):
+    groups = {}
+
     for u in urls:
-        if "_720w" in u:
-            return u
+        match = re.search(r'/([a-f0-9]{32})', u)
+        if match:
+            vid = match.group(1)
+            groups.setdefault(vid, []).append(u)
 
-    def score(u):
-        m = re.search(r"_(\d+)w\.m3u8", u)
-        return int(m.group(1)) if m else 0
+    if not groups:
+        return None, None
 
-    return sorted(urls, key=score, reverse=True)[0]
+    group = list(groups.values())[0]
+
+    video_url = None
+    audio_url = None
+
+    # best video quality
+    for q in ["_720w", "_540w", "_480w", "_360w", "_240w"]:
+        for u in group:
+            if q in u:
+                video_url = u
+                break
+        if video_url:
+            break
+
+    # fallback video
+    if not video_url:
+        for u in group:
+            if "_audio" not in u:
+                video_url = u
+                break
+
+    # audio
+    for u in group:
+        if "_audio" in u:
+            audio_url = u
+            break
+
+    return video_url, audio_url
 
 
 def extract_from_page_source(page):
@@ -81,14 +112,12 @@ def run():
         page.wait_for_timeout(WAIT)
         dismiss_modal(page)
 
-        # scroll to ensure pins load
         page.mouse.wheel(0, 1500)
         page.wait_for_timeout(3000)
 
         pins = page.locator("div[data-test-id='pin']")
         pins.first.wait_for(timeout=20000)
 
-        # ✅ get visible pins (top viewport)
         visible_pins = []
         for i in range(pins.count()):
             try:
@@ -98,10 +127,10 @@ def run():
             except:
                 continue
 
-        # ✅ first 4 visually
         top_pins = visible_pins[:4]
 
-        found_url = None
+        found_video = None
+        found_audio = None
 
         for pin in top_pins:
             collected_m3u8 = []
@@ -113,7 +142,7 @@ def run():
             page.on("response", handle_response)
 
             try:
-                href = pin.locator("a").get_attribute("href")
+                href = pin.locator("a").first.get_attribute("href")
                 if not href:
                     continue
 
@@ -122,7 +151,6 @@ def run():
                 if not goto_with_retry(page, pin_url):
                     continue
 
-                # 🔥 FORCE VIDEO LOAD
                 page.mouse.move(300, 400)
                 page.mouse.wheel(0, 300)
                 page.wait_for_timeout(2000)
@@ -134,15 +162,11 @@ def run():
 
                 page.wait_for_timeout(3000)
 
-                # ✅ 1. PAGE SOURCE (PRIMARY)
-                src = extract_from_page_source(page)
-                if src:
-                    found_url = src
-                    break
+                video_url, audio_url = pick_video_and_audio(collected_m3u8)
 
-                # ✅ 2. NETWORK FALLBACK
-                if collected_m3u8:
-                    found_url = pick_best_m3u8(collected_m3u8)
+                if video_url:
+                    found_video = video_url
+                    found_audio = audio_url
                     break
 
             except:
@@ -150,32 +174,48 @@ def run():
 
         browser.close()
 
-        if not found_url:
+        if not found_video:
             print("No video found in first 4 visible pins")
             sys.exit(1)
 
-        print("Found video:", found_url)
+        print("Video:", found_video)
+        print("Audio:", found_audio)
 
         create_button_png()
 
-        os.system(
-            f'ffmpeg -y '
-            f'-i "{found_url}" '
-            f'-i "shop_now_btn.png" '
-            f'-f lavfi -i anullsrc=r=44100:cl=stereo '
-            f'-t 15 '
-            f'-filter_complex '
-            f'"[0:v]scale=720:1280[bg];'
-            f'[bg][1:v]overlay=(W-w)/2:H-220" '
-            f'-r 30 '
-            f'-pix_fmt yuv420p '
-            f'-c:v libx264 '
-            f'-preset veryfast '
-            f'-c:a aac '
-            f'-b:a 128k '
-            f'-shortest '
-            f'output.mp4'
-        )
+        # 🔥 FFMPEG WITH AUDIO
+        if found_audio:
+            cmd = (
+                f'ffmpeg -y '
+                f'-i "{found_video}" '
+                f'-i "{found_audio}" '
+                f'-i "shop_now_btn.png" '
+                f'-filter_complex '
+                f'"[0:v]scale=720:1280[bg];'
+                f'[bg][2:v]overlay=(W-w)/2:H-220" '
+                f'-c:v libx264 '
+                f'-preset fast '
+                f'-c:a aac '
+                f'-shortest '
+                f'output.mp4'
+            )
+        else:
+            cmd = (
+                f'ffmpeg -y '
+                f'-i "{found_video}" '
+                f'-i "shop_now_btn.png" '
+                f'-f lavfi -i anullsrc=r=44100:cl=stereo '
+                f'-filter_complex '
+                f'"[0:v]scale=720:1280[bg];'
+                f'[bg][1:v]overlay=(W-w)/2:H-220" '
+                f'-c:v libx264 '
+                f'-preset fast '
+                f'-c:a aac '
+                f'-shortest '
+                f'output.mp4'
+            )
+
+        os.system(cmd)
 
         print("Saved as output.mp4")
 
