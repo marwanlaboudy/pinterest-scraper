@@ -50,34 +50,34 @@ def goto_with_retry(page, url, retries=3):
     return False
 
 
-def title_matches_product(page, product_title, threshold=0.3):
-    """
-    Read the pin h1 title and compare against product title.
-    Returns True if enough keywords overlap.
-    """
+def title_matches_product(page, product_title):
     try:
         h1 = page.locator("h1").first
         pin_title = h1.inner_text(timeout=5000).lower()
         log(f"Pin title: '{pin_title}'")
 
-        stopwords = {"the", "and", "for", "with", "from", "this", "that", "your", "are"}
-        product_words = set(
+        # Only ignore grammar/filler words — all product words count
+        stopwords = {
+            "the", "and", "for", "with", "from", "this", "that", "your", "are",
+            "its", "into", "have", "has", "was", "will", "can", "not", "but",
+            "also", "more", "than", "then", "when", "what", "which", "who"
+        }
+
+        product_words = [
             w for w in re.sub(r'[^a-z0-9 ]', '', product_title.lower()).split()
-            if len(w) > 3 and w not in stopwords
-        )
+            if len(w) > 2 and w not in stopwords
+        ]
+
+        log(f"Checking keywords: {product_words}")
 
         matches = sum(1 for w in product_words if w in pin_title)
-        score = matches / len(product_words) if product_words else 0
+        log(f"Matches: {matches}/{len(product_words)} — need > 3")
 
-        log(f"Product keywords: {product_words}")
-        log(f"Matches: {matches}/{len(product_words)} = {score:.0%}")
-
-        return score >= threshold
+        return matches > 3
 
     except Exception as e:
         log(f"Title check failed: {e} — allowing pin through")
-        return True  # can't check, allow through
-
+        return True
 
 def get_best_stream_url(master_url):
     """Parse the master m3u8 and return the highest bandwidth variant URL."""
