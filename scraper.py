@@ -7,7 +7,7 @@ from playwright.sync_api import sync_playwright
 query = sys.argv[1]
 
 IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
-WAIT = 10000 if IS_CI else 4000
+WAIT = 12000 if IS_CI else 5000
 
 
 def dismiss_modal(page):
@@ -30,14 +30,14 @@ def goto_with_retry(page, url, retries=3):
     return False
 
 
-# 🔥 NEW: extract video + audio together
+# ✅ group URLs and extract best video + audio
 def pick_video_and_audio(urls):
     groups = {}
 
     for u in urls:
-        match = re.search(r'/([a-f0-9]{32})', u)
-        if match:
-            vid = match.group(1)
+        m = re.search(r'/([a-f0-9]{32})', u)
+        if m:
+            vid = m.group(1)
             groups.setdefault(vid, []).append(u)
 
     if not groups:
@@ -48,7 +48,6 @@ def pick_video_and_audio(urls):
     video_url = None
     audio_url = None
 
-    # best video quality
     for q in ["_720w", "_540w", "_480w", "_360w", "_240w"]:
         for u in group:
             if q in u:
@@ -57,29 +56,18 @@ def pick_video_and_audio(urls):
         if video_url:
             break
 
-    # fallback video
     if not video_url:
         for u in group:
             if "_audio" not in u:
                 video_url = u
                 break
 
-    # audio
     for u in group:
         if "_audio" in u:
             audio_url = u
             break
 
     return video_url, audio_url
-
-
-def extract_from_page_source(page):
-    try:
-        content = page.content()
-        matches = re.findall(r'https://v1\.pinimg\.com/videos/[^"\']+\.m3u8', content)
-        return matches[0] if matches else None
-    except:
-        return None
 
 
 def create_button_png(path="shop_now_btn.png"):
@@ -102,8 +90,17 @@ def create_button_png(path="shop_now_btn.png"):
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+
+        # ✅ FIXED VIEWPORT (matches VS behavior)
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0"
+        )
+
         page = context.new_page()
 
         search_url = f"https://www.pinterest.com/search/videos/?q={query.replace(' ', '+')}"
@@ -112,7 +109,8 @@ def run():
         page.wait_for_timeout(WAIT)
         dismiss_modal(page)
 
-        page.mouse.wheel(0, 1500)
+        # small scroll just to ensure loading
+        page.mouse.wheel(0, 800)
         page.wait_for_timeout(3000)
 
         pins = page.locator("div[data-test-id='pin']")
@@ -122,12 +120,13 @@ def run():
         for i in range(pins.count()):
             try:
                 box = pins.nth(i).bounding_box()
-                if box and box["y"] < 800:
+                if box and 0 < box["y"] < 600:
                     visible_pins.append(pins.nth(i))
             except:
                 continue
 
-        top_pins = visible_pins[:4]
+        # ✅ take more pins for reliability in CI
+        top_pins = visible_pins[:6]
 
         found_video = None
         found_audio = None
@@ -139,6 +138,7 @@ def run():
                 if ".m3u8" in resp.url:
                     collected_m3u8.append(resp.url)
 
+            # attach listener fresh each loop
             page.on("response", handle_response)
 
             try:
@@ -151,16 +151,10 @@ def run():
                 if not goto_with_retry(page, pin_url):
                     continue
 
+                # force video load
                 page.mouse.move(300, 400)
                 page.mouse.wheel(0, 300)
-                page.wait_for_timeout(2000)
-
-                try:
-                    page.click("video", timeout=3000)
-                except:
-                    pass
-
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(6000)
 
                 video_url, audio_url = pick_video_and_audio(collected_m3u8)
 
@@ -175,7 +169,7 @@ def run():
         browser.close()
 
         if not found_video:
-            print("No video found in first 4 visible pins")
+            print("No video found in first pins")
             sys.exit(1)
 
         print("Video:", found_video)
@@ -183,7 +177,7 @@ def run():
 
         create_button_png()
 
-        # 🔥 FFMPEG WITH AUDIO
+        # ✅ FFMPEG MERGE (with fallback)
         if found_audio:
             cmd = (
                 f'ffmpeg -y '
@@ -191,13 +185,9 @@ def run():
                 f'-i "{found_audio}" '
                 f'-i "shop_now_btn.png" '
                 f'-filter_complex '
-                f'"[0:v]scale=720:1280[bg];'
-                f'[bg][2:v]overlay=(W-w)/2:H-220" '
-                f'-c:v libx264 '
-                f'-preset fast '
-                f'-c:a aac '
-                f'-shortest '
-                f'output.mp4'
+                f'"[0:v]scale=720:1280[bg];[bg][2:v]overlay=(W-w)/2:H-220" '
+                f'-c:v libx264 -preset fast '
+                f'-c:a aac -shortest output.mp4'
             )
         else:
             cmd = (
@@ -206,13 +196,9 @@ def run():
                 f'-i "shop_now_btn.png" '
                 f'-f lavfi -i anullsrc=r=44100:cl=stereo '
                 f'-filter_complex '
-                f'"[0:v]scale=720:1280[bg];'
-                f'[bg][1:v]overlay=(W-w)/2:H-220" '
-                f'-c:v libx264 '
-                f'-preset fast '
-                f'-c:a aac '
-                f'-shortest '
-                f'output.mp4'
+                f'"[0:v]scale=720:1280[bg];[bg][1:v]overlay=(W-w)/2:H-220" '
+                f'-c:v libx264 -preset fast '
+                f'-c:a aac -shortest output.mp4'
             )
 
         os.system(cmd)
