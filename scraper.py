@@ -16,7 +16,6 @@ def log(msg):
     print(msg, flush=True)
 
 
-# 🔥 ADDED
 def write_status(status):
     with open("status.txt", "w") as f:
         f.write(status)
@@ -62,6 +61,11 @@ def title_matches_product(page, product_title):
         pin_title = h1.inner_text(timeout=5000).lower()
         log(f"Pin title: '{pin_title}'")
 
+        # If Pinterest shows login wall, allow pin through
+        if "log in" in pin_title or "sign up" in pin_title or "login" in pin_title:
+            log("Login wall detected — allowing pin through")
+            return True
+
         stopwords = {
             "the", "and", "for", "with", "from", "this", "that", "your", "are",
             "its", "into", "have", "has", "was", "will", "can", "not", "but",
@@ -73,10 +77,15 @@ def title_matches_product(page, product_title):
             if len(w) > 2 and w not in stopwords
         ]
 
-        log(f"Checking keywords: {product_words}")
+        log(f"Product keywords: {product_words}")
 
         matches = sum(1 for w in product_words if w in pin_title)
         log(f"Matches: {matches}/{len(product_words)} — need > 3")
+
+        if matches > 3:
+            log(f"Title MATCHED: '{pin_title}'")
+        else:
+            log(f"Title NOT matched: '{pin_title}'")
 
         return matches > 3
 
@@ -220,6 +229,7 @@ def run():
             locale="en-US",
             timezone_id="America/New_York",
             java_script_enabled=True,
+            storage_state="pinterest_session.json",
         )
 
         context.add_init_script(
@@ -300,19 +310,25 @@ def run():
                 page.wait_for_timeout(2000)
 
                 if not title_matches_product(page, product_title):
-                    log("❌ Title mismatch — skipping pin")
+                    log("Title mismatch — skipping pin")
                     continue
 
-                log("✅ Title matches — checking for video...")
+                log("Title matches — checking for video...")
                 page.mouse.move(300, 400)
                 page.wait_for_timeout(3000)
 
                 new_urls = all_m3u8[before_count:]
+                log(f"Network captured {len(new_urls)} new master streams")
+
                 html_urls = extract_m3u8_from_page(page)
+                log(f"HTML extraction found {len(html_urls)} master streams")
+
                 combined = list(dict.fromkeys(new_urls + html_urls))
+                log(f"Combined unique masters: {len(combined)}")
 
                 if combined:
                     found_master = combined[0]
+                    log(f"Using master: {found_master}")
                     break
 
             except Exception as e:
@@ -329,13 +345,42 @@ def run():
         best_video_url = get_best_stream_url(found_master)
         audio_url = get_audio_url(found_master)
 
+        log(f"FINAL VIDEO STREAM: {best_video_url}")
+        log(f"FINAL AUDIO STREAM: {audio_url}")
+
         create_button_png()
+        log("Running ffmpeg...")
 
         if audio_url:
-            cmd = f'ffmpeg -y -i "{best_video_url}" -i "{audio_url}" -i shop_now_btn.png -filter_complex "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];[bg][2:v]overlay=(W-w)/2:H-160[out]" -map "[out]" -map 1:a -c:v libx264 -c:a aac output.mp4'
+            cmd = (
+                f'ffmpeg -y '
+                f'-i "{best_video_url}" '
+                f'-i "{audio_url}" '
+                f'-i "shop_now_btn.png" '
+                f'-filter_complex '
+                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,'
+                f'pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
+                f'[bg][2:v]overlay=(W-w)/2:H-160[out]" '
+                f'-map "[out]" -map 1:a '
+                f'-c:v libx264 -preset fast -crf 18 '
+                f'-c:a aac -b:a 128k -shortest output.mp4'
+            )
         else:
-            cmd = f'ffmpeg -y -i "{best_video_url}" -i shop_now_btn.png -filter_complex "[0:v]scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];[bg][1:v]overlay=(W-w)/2:H-160[out]" -map "[out]" -c:v libx264 output.mp4'
+            cmd = (
+                f'ffmpeg -y '
+                f'-i "{best_video_url}" '
+                f'-i "shop_now_btn.png" '
+                f'-f lavfi -i anullsrc=r=44100:cl=stereo '
+                f'-filter_complex '
+                f'"[0:v]scale=720:1280:force_original_aspect_ratio=decrease,'
+                f'pad=720:1280:(ow-iw)/2:(oh-ih)/2[bg];'
+                f'[bg][1:v]overlay=(W-w)/2:H-160[out]" '
+                f'-map "[out]" -map 2:a '
+                f'-c:v libx264 -preset fast -crf 18 '
+                f'-c:a aac -b:a 128k -shortest output.mp4'
+            )
 
+        log(f"FFmpeg command:\n{cmd}")
         os.system(cmd)
 
         if os.path.exists("output.mp4"):
