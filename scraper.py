@@ -57,7 +57,6 @@ def goto_with_retry(page, url, retries=3):
 
 def title_matches_product(page, product_title):
     try:
-        # Try multiple selectors Pinterest uses for pin titles
         pin_title = ""
         for selector in ["h1", "[data-test-id='pin-closeup-title']", "h2", "[class*='title']"]:
             try:
@@ -71,7 +70,7 @@ def title_matches_product(page, product_title):
 
         if not pin_title:
             log("Could not find pin title — skipping pin to be safe")
-            return False  # CHANGED: skip instead of allow through
+            return False
 
         log(f"Pin title: '{pin_title}'")
 
@@ -104,7 +103,8 @@ def title_matches_product(page, product_title):
 
     except Exception as e:
         log(f"Title check failed: {e} — skipping pin to be safe")
-        return False  # CHANGED: skip instead of allow through
+        return False
+
 
 def get_best_stream_url(master_url):
     try:
@@ -313,7 +313,8 @@ def run():
             pin_url = f"https://www.pinterest.com{href}"
             log(f"Opening pin: {pin_url}")
 
-            before_count = len(all_m3u8)
+            # Clear all previously captured streams before each pin
+            all_m3u8.clear()
 
             try:
                 if not goto_with_retry(page, pin_url):
@@ -329,8 +330,8 @@ def run():
                 page.mouse.move(300, 400)
                 page.wait_for_timeout(3000)
 
-                new_urls = all_m3u8[before_count:]
-                log(f"Network captured {len(new_urls)} new master streams")
+                new_urls = list(all_m3u8)
+                log(f"Network captured {len(new_urls)} streams for this pin")
 
                 html_urls = extract_m3u8_from_page(page)
                 log(f"HTML extraction found {len(html_urls)} master streams")
