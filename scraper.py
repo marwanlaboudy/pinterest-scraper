@@ -57,12 +57,25 @@ def goto_with_retry(page, url, retries=3):
 
 def title_matches_product(page, product_title):
     try:
-        h1 = page.locator("h1").first
-        pin_title = h1.inner_text(timeout=5000).lower()
+        # Try multiple selectors Pinterest uses for pin titles
+        pin_title = ""
+        for selector in ["h1", "[data-test-id='pin-closeup-title']", "h2", "[class*='title']"]:
+            try:
+                el = page.locator(selector).first
+                text = el.inner_text(timeout=3000).lower().strip()
+                if text and "log in" not in text and len(text) > 5:
+                    pin_title = text
+                    break
+            except:
+                continue
+
+        if not pin_title:
+            log("Could not find pin title — skipping pin to be safe")
+            return False  # CHANGED: skip instead of allow through
+
         log(f"Pin title: '{pin_title}'")
 
-        # If Pinterest shows login wall, allow pin through
-        if "log in" in pin_title or "sign up" in pin_title or "login" in pin_title:
+        if "log in" in pin_title or "sign up" in pin_title:
             log("Login wall detected — allowing pin through")
             return True
 
@@ -90,9 +103,8 @@ def title_matches_product(page, product_title):
         return matches > 3
 
     except Exception as e:
-        log(f"Title check failed: {e} — allowing pin through")
-        return True
-
+        log(f"Title check failed: {e} — skipping pin to be safe")
+        return False  # CHANGED: skip instead of allow through
 
 def get_best_stream_url(master_url):
     try:
