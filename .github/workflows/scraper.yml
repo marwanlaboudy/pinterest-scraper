@@ -35,12 +35,10 @@ jobs:
       - name: Save video to repo
         run: |
           mkdir -p videos
-          FILENAME="latest.mp4"
-          mv -f output.mp4 videos/$FILENAME
+          mv -f output.mp4 videos/latest.mp4 2>/dev/null || echo "No video to move"
+          cp status.txt videos/status.txt 2>/dev/null || echo "No status file"
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add videos/$FILENAME
+          git add videos/
           git commit -m "Update latest video" || echo "No changes"
           git push
-
-     
