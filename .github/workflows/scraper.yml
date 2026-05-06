@@ -38,7 +38,7 @@ jobs:
         run: |
           mkdir -p videos
           mv -f output.mp4 videos/latest.mp4 2>/dev/null || echo "No video to move"
-          cp status.txt videos/status.txt 2>/dev/null || echo "No status file"
+          cp status.txt videos/status.txt 2>/dev/null || echo "NOT_FOUND" > videos/status.txt
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git pull --rebase origin main
