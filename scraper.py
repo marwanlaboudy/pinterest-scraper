@@ -276,7 +276,14 @@ def run():
         close_filters(page)
 
         pins = page.locator("div[data-test-id='pin']")
-        pins.first.wait_for(timeout=20000)
+
+        try:
+            pins.first.wait_for(timeout=20000)
+        except Exception as e:
+            log(f"No pins found: {e}")
+            browser.close()
+            write_status("NOT_FOUND")
+            return
 
         total = pins.count()
         log(f"Total pins found: {total}")
@@ -313,7 +320,6 @@ def run():
             pin_url = f"https://www.pinterest.com{href}"
             log(f"Opening pin: {pin_url}")
 
-            # Clear all previously captured streams before each pin
             all_m3u8.clear()
 
             try:
