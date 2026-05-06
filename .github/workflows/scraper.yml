@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Load Pinterest session
         run: |
@@ -39,6 +41,7 @@ jobs:
           cp status.txt videos/status.txt 2>/dev/null || echo "No status file"
           git config user.name "github-actions"
           git config user.email "actions@github.com"
+          git pull --rebase origin main
           git add videos/
           git commit -m "Update latest video" || echo "No changes"
           git push
